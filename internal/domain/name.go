@@ -100,3 +100,29 @@ func NormalizeHost(host string) string {
 func isASCIILetter(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
+
+// PrimaryDNSName picks the subject alternative name that best identifies a
+// certificate, for use when deriving a default Key Vault name.
+//
+// A wildcard wins over a plain name: a certificate covering both "*.x.com" and
+// "x.com" is understood by its wildcard, and naming it "wildcard-x-com" rather
+// than "x-com" reads correctly next to the Application Gateway listener that
+// serves it. Ties are broken by sort order so the result is deterministic.
+func PrimaryDNSName(names []string) string {
+	best := ""
+	for _, raw := range names {
+		name := NormalizeHost(raw)
+		if name == "" {
+			continue
+		}
+		switch {
+		case best == "":
+			best = name
+		case strings.HasPrefix(name, "*.") && !strings.HasPrefix(best, "*."):
+			best = name
+		case strings.HasPrefix(name, "*.") == strings.HasPrefix(best, "*.") && name < best:
+			best = name
+		}
+	}
+	return best
+}

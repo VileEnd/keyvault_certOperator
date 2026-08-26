@@ -122,3 +122,28 @@ func TestDisambiguateVaultName(t *testing.T) {
 		t.Errorf("disambiguated name is invalid: %v", err)
 	}
 }
+
+func TestPrimaryDNSName(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		names []string
+		want  string
+	}{
+		{"wildcard preferred over apex", []string{"x.com", "*.x.com"}, "*.x.com"},
+		{"order does not matter", []string{"*.x.com", "x.com"}, "*.x.com"},
+		{"shortest wildcard wins", []string{"*.sub.x.com", "*.x.com"}, "*.sub.x.com"},
+		{"plain names fall back to sort order", []string{"b.x.com", "a.x.com"}, "a.x.com"},
+		{"single name", []string{"x.com"}, "x.com"},
+		{"empty", nil, ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := domain.PrimaryDNSName(tc.names); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

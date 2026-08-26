@@ -274,3 +274,27 @@ func TestSyncPropagatesVaultErrors(t *testing.T) {
 		t.Errorf("Sync() = %v, want it to wrap %v", err, sentinel)
 	}
 }
+
+func TestSyncDerivesTheVaultNameFromTheCertificateSANs(t *testing.T) {
+	t.Parallel()
+	// Leaving certificateName unset must produce a usable Key Vault name from
+	// the certificate itself, so the common case needs no configuration.
+	bundle := newBundle(t, "x.com", "*.x.com")
+	vault := &fakeVault{snapshot: domain.VaultSnapshot{Exists: false}}
+
+	req := request()
+	req.Vault.CertificateName = ""
+
+	outcome, err := newSyncer(&fakeSource{bundle: bundle}, vault, &fakeEncoder{}).Sync(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	// The wildcard identifies the certificate better than the apex does.
+	if outcome.CertificateName != "wildcard-x-com" {
+		t.Errorf("certificate name = %q, want wildcard-x-com", outcome.CertificateName)
+	}
+	if outcome.SecretIdentifier != "https://my-vault.vault.azure.net/secrets/wildcard-x-com" {
+		t.Errorf("secret identifier = %q", outcome.SecretIdentifier)
+	}
+}

@@ -1,0 +1,6 @@
+/*
+Copyright 2026 VileEnd.
+
+Licensed under the MIT License. See the LICENSE file in the repository root
+for the full license text.
+*/

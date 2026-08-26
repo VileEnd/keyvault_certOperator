@@ -1,0 +1,269 @@
+package v1alpha1
+
+import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+)
+
+// CertificateGrouping selects how discovered hostnames are packed into certificates.
+// +kubebuilder:validation:Enum=PerZone;PerWildcard
+type CertificateGrouping string
+
+const (
+	// GroupingPerZone issues one SAN certificate per zone. This is the default
+	// and keeps the Application Gateway listener, site and certificate counts as
+	// low as possible -- all three share a hard, non-adjustable ceiling of 100.
+	GroupingPerZone CertificateGrouping = "PerZone"
+	// GroupingPerWildcard issues one certificate per distinct wildcard.
+	GroupingPerWildcard CertificateGrouping = "PerWildcard"
+)
+
+// OrphanPolicy decides what happens to a certificate that discovery no longer
+// requires.
+// +kubebuilder:validation:Enum=Retain;Prune
+type OrphanPolicy string
+
+const (
+	// OrphanRetain leaves orphaned certificates in place and only reports them.
+	// This is the default because an Application Gateway listener may still be
+	// serving the certificate, and removing it would disable that listener.
+	OrphanRetain OrphanPolicy = "Retain"
+	// OrphanPrune deletes the cert-manager Certificate and the sync resource.
+	// The Key Vault certificate itself is never deleted under either policy.
+	OrphanPrune OrphanPolicy = "Prune"
+)
+
+// IssuerReference points at the cert-manager issuer that performs DNS-01.
+//
+// The issuer is referenced, never created: it holds ACME account details and
+// solver configuration that belong to the cluster operator, not to us.
+type IssuerReference struct {
+	// Name of the issuer.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Kind of the issuer.
+	// +optional
+	// +kubebuilder:validation:Enum=Issuer;ClusterIssuer
+	// +kubebuilder:default=ClusterIssuer
+	Kind string `json:"kind,omitempty"`
+
+	// Group of the issuer.
+	// +optional
+	// +kubebuilder:default=cert-manager.io
+	Group string `json:"group,omitempty"`
+}
+
+// DiscoverySpec selects where hostnames are discovered from.
+type DiscoverySpec struct {
+	// Ingress enables discovery from networking.k8s.io Ingress resources.
+	// +optional
+	// +kubebuilder:default=true
+	Ingress *bool `json:"ingress,omitempty"`
+
+	// HTTPRoutes enables discovery from Gateway API HTTPRoute resources.
+	//
+	// The watch can only be established if the Gateway API CRDs are present when
+	// the operator starts, so installing Gateway API later requires a restart.
+	// +optional
+	// +kubebuilder:default=true
+	HTTPRoutes *bool `json:"httpRoutes,omitempty"`
+
+	// NamespaceSelector narrows discovery to matching namespaces. Empty means
+	// all namespaces.
+	// +optional
+	NamespaceSelector *metav1.LabelSelector `json:"namespaceSelector,omitempty"`
+}
+
+// WildcardCertificatePolicySpec describes which wildcards the cluster needs.
+type WildcardCertificatePolicySpec struct {
+	// Zones is the allowlist of DNS zones issuance may happen inside. It is
+	// required and has no permissive default.
+	//
+	// This is the primary safety boundary. Discovery reacts to Ingress and
+	// HTTPRoute resources, so without an allowlist anyone able to create one
+	// could trigger ACME issuance and spend the cluster's Let's Encrypt rate
+	// limit for a registered domain. Zones at or above a public suffix are
+	// rejected, so "*.com" is unreachable by construction.
+	// +required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=50
+	Zones []string `json:"zones"`
+
+	// MaxCertificates caps how many certificates may be planned. The overflow is
+	// reported in status rather than issued.
+	// +optional
+	// +kubebuilder:default=10
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	MaxCertificates int32 `json:"maxCertificates,omitempty"`
+
+	// Discovery selects the sources of hostnames.
+	// +optional
+	Discovery *DiscoverySpec `json:"discovery,omitempty"`
+
+	// Grouping selects how SANs are packed into certificates.
+	// +optional
+	// +kubebuilder:default=PerZone
+	Grouping CertificateGrouping `json:"grouping,omitempty"`
+
+	// IssuerRef names the cert-manager issuer used for DNS-01.
+	//
+	// Wildcards cannot use HTTP-01, so the issuer must be configured with a
+	// DNS-01 solver. DNS-01 never touches the cluster, which is why no pod,
+	// Service or Ingress is needed to satisfy the challenge.
+	// +required
+	IssuerRef IssuerReference `json:"issuerRef"`
+
+	// CertificateNamespace is where the cert-manager Certificate resources, the
+	// resulting Secrets and the generated sync resources are created.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	CertificateNamespace string `json:"certificateNamespace"`
+
+	// KeyVault identifies the destination vault.
+	// +required
+	KeyVault KeyVaultSpec `json:"keyVault"`
+
+	// OrphanPolicy decides what happens to no-longer-required certificates.
+	// +optional
+	// +kubebuilder:default=Retain
+	OrphanPolicy OrphanPolicy `json:"orphanPolicy,omitempty"`
+
+	// SyncPolicy is applied to every generated sync resource.
+	// +optional
+	SyncPolicy *SyncPolicySpec `json:"syncPolicy,omitempty"`
+}
+
+// PlannedCertificate is one certificate discovery decided the cluster needs.
+type PlannedCertificate struct {
+	// Name is the cert-manager Certificate and Key Vault certificate name.
+	Name string `json:"name"`
+	// Zone is the allowlisted zone it was planned under.
+	Zone string `json:"zone"`
+	// DNSNames are the subject alternative names it must carry.
+	// +kubebuilder:validation:MaxItems=100
+	DNSNames []string `json:"dnsNames"`
+	// SecretName is the Secret cert-manager writes.
+	SecretName string `json:"secretName"`
+	// SecretIdentifier is the versionless Key Vault URI for the listener.
+	SecretIdentifier string `json:"secretIdentifier"`
+}
+
+// SkippedHost records a discovered hostname that was deliberately not covered.
+type SkippedHost struct {
+	// Host is the hostname.
+	Host string `json:"host"`
+	// Reason explains why it was skipped.
+	Reason string `json:"reason"`
+}
+
+// ListenerGuidance is a ready-to-apply Application Gateway listener.
+type ListenerGuidance struct {
+	// Hostnames for one multi-site listener. Application Gateway allows at most
+	// five per listener, so a certificate with more SANs than that yields
+	// several entries here.
+	// +kubebuilder:validation:MaxItems=5
+	Hostnames []string `json:"hostnames"`
+	// KeyVaultSecretID is the versionless secret identifier to configure. Using
+	// a versioned one would permanently disable automatic rotation.
+	KeyVaultSecretID string `json:"keyVaultSecretID"`
+}
+
+// ApplicationGatewayGuidance is emitted as data for Terraform or the CLI to
+// consume. The operator holds no ARM permissions and never writes gateway
+// configuration itself.
+type ApplicationGatewayGuidance struct {
+	// Listeners is the set of listeners needed to serve every planned certificate.
+	// +optional
+	// +kubebuilder:validation:MaxItems=100
+	Listeners []ListenerGuidance `json:"listeners,omitempty"`
+}
+
+// WildcardCertificatePolicyStatus reports the observed state of discovery.
+type WildcardCertificatePolicyStatus struct {
+	// Conditions holds Ready, Discovered and CertManagerAvailable.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// ObservedGeneration is the .metadata.generation this status was computed from.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// DiscoveredHosts counts the hostnames found. It is a count rather than a
+	// list because a large cluster would otherwise put an unbounded value into
+	// etcd.
+	// +optional
+	DiscoveredHosts int32 `json:"discoveredHosts,omitempty"`
+
+	// RequiredCertificates is the planned certificate set.
+	// +optional
+	// +kubebuilder:validation:MaxItems=100
+	RequiredCertificates []PlannedCertificate `json:"requiredCertificates,omitempty"`
+
+	// SkippedHosts lists hostnames that were not covered, with reasons. It is
+	// truncated to a bounded sample; SkippedHostCount reports the true total.
+	// +optional
+	// +kubebuilder:validation:MaxItems=50
+	SkippedHosts []SkippedHost `json:"skippedHosts,omitempty"`
+
+	// SkippedHostCount is the total number of skipped hostnames.
+	// +optional
+	SkippedHostCount int32 `json:"skippedHostCount,omitempty"`
+
+	// ApplicationGateway is the listener configuration to apply out of band.
+	// +optional
+	ApplicationGateway *ApplicationGatewayGuidance `json:"applicationGateway,omitempty"`
+
+	// LastDiscoveryTime is when discovery last completed.
+	// +optional
+	LastDiscoveryTime *metav1.Time `json:"lastDiscoveryTime,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Cluster,shortName=wcp,categories=certsync
+// +kubebuilder:printcolumn:name="Zones",type=string,JSONPath=`.spec.zones`
+// +kubebuilder:printcolumn:name="Certificates",type=integer,JSONPath=`.status.discoveredHosts`,priority=1
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+
+// WildcardCertificatePolicy discovers the hostnames the cluster routes, decides
+// which wildcard certificates cover them, has cert-manager issue those, and
+// keeps them synced into Azure Key Vault.
+//
+// It exists because Application Gateway's per-gateway limits -- 100 backend
+// pools, 100 backend HTTP settings, 100 active listeners, 100 SSL certificates,
+// all hard -- make one listener per service unworkable past roughly a hundred
+// applications. A handful of wildcard certificates uses a few percent of those
+// budgets no matter how many services sit behind the in-cluster proxy.
+type WildcardCertificatePolicy struct {
+	metav1.TypeMeta `json:",inline"`
+	// +optional
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	// +required
+	Spec WildcardCertificatePolicySpec `json:"spec"`
+	// +optional
+	Status WildcardCertificatePolicyStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+// WildcardCertificatePolicyList contains a list of WildcardCertificatePolicy.
+type WildcardCertificatePolicyList struct {
+	metav1.TypeMeta `json:",inline"`
+	// +optional
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []WildcardCertificatePolicy `json:"items"`
+}
+
+func init() {
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(SchemeGroupVersion, &WildcardCertificatePolicy{}, &WildcardCertificatePolicyList{})
+		return nil
+	})
+}

@@ -23,6 +23,10 @@ type SyncOutcome struct {
 	// Warning is non-empty when something deserves attention but not failure.
 	Warning string
 
+	// CertificateName is the Key Vault object name used, whether it came from
+	// the request or was derived from the certificate's SANs.
+	CertificateName string
+
 	Thumbprint  string
 	ChainDigest string
 	NotAfter    time.Time
@@ -60,13 +64,24 @@ func NewSyncer(source CertificateSource, vault VaultRepository, encoder Encoder)
 // Gateway certificate rotation within four hours. A reconcile loop that imported
 // unconditionally would therefore degrade the vault and churn TLS on every pass.
 func (s *Syncer) Sync(ctx context.Context, req SyncRequest) (SyncOutcome, error) {
-	if err := domain.ValidateVaultCertificateName(req.Vault.CertificateName); err != nil {
-		return SyncOutcome{}, err
-	}
-
 	bundle, err := s.Source.Load(ctx, req.Source)
 	if err != nil {
 		return SyncOutcome{}, fmt.Errorf("loading certificate from %s: %w", req.Source, err)
+	}
+
+	// The Key Vault name is derived here rather than in the controller so that
+	// the certificate is read only once. Derivation is a default only: the CRD
+	// exposes the name, because an Application Gateway listener references it
+	// and a silent change would be an outage.
+	if req.Vault.CertificateName == "" {
+		derived, err := domain.DeriveVaultCertificateName(domain.PrimaryDNSName(bundle.DNSNames()))
+		if err != nil {
+			return SyncOutcome{}, fmt.Errorf("deriving a Key Vault certificate name for %s: %w", req.Source, err)
+		}
+		req.Vault.CertificateName = derived
+	}
+	if err := domain.ValidateVaultCertificateName(req.Vault.CertificateName); err != nil {
+		return SyncOutcome{}, err
 	}
 
 	snapshot, err := s.Vault.Snapshot(ctx, req.Vault)
@@ -81,6 +96,7 @@ func (s *Syncer) Sync(ctx context.Context, req SyncRequest) (SyncOutcome, error)
 
 	outcome := SyncOutcome{
 		Action:           decision.Action,
+		CertificateName:  req.Vault.CertificateName,
 		Reason:           decision.Reason,
 		Warning:          decision.Warning,
 		Thumbprint:       bundle.ThumbprintHex(),
