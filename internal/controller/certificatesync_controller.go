@@ -80,8 +80,12 @@ func (r *KeyVaultCertificateSyncReconciler) Reconcile(ctx context.Context, req c
 	outcome, err := r.sync(ctx, &sync)
 	if err != nil {
 		reason, retryable := classify(err)
-		log.Error(err, "sync failed", "reason", reason, "retryable", retryable)
-		syncTotal.WithLabelValues(sync.Namespace, sync.Name, "error").Inc()
+		if reason == ReasonSourceNotFound {
+			log.V(1).Info("waiting for the source certificate", "reason", err.Error())
+		} else {
+			log.Error(err, "sync failed", "reason", reason, "retryable", retryable)
+			syncTotal.WithLabelValues(sync.Namespace, sync.Name, "error").Inc()
+		}
 
 		setFalse(&sync.Status.Conditions, v1alpha1.ConditionSynced, reason, err.Error(), sync.Generation)
 		setFalse(&sync.Status.Conditions, v1alpha1.ConditionReady, reason, err.Error(), sync.Generation)

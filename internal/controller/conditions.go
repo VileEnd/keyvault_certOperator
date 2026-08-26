@@ -3,6 +3,7 @@ package controller
 import (
 	"errors"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -15,6 +16,7 @@ const (
 	ReasonUpToDate           = "UpToDate"
 	ReasonImported           = "Imported"
 	ReasonSourceInvalid      = "SourceInvalid"
+	ReasonSourceNotFound     = "SourceNotFound"
 	ReasonCertificateExpired = "CertificateExpired"
 	ReasonConfigInvalid      = "ConfigInvalid"
 	ReasonVaultError         = "VaultError"
@@ -56,6 +58,12 @@ func setFalse(conditions *[]metav1.Condition, conditionType, reason, message str
 // throttling, API server hiccups, network failures -- is worth a backoff.
 func classify(err error) (reason string, retryable bool) {
 	switch {
+	case apierrors.IsNotFound(err):
+		// Normal while cert-manager is still issuing: the sync resource is
+		// created alongside the Certificate, so it necessarily runs before the
+		// Secret exists. The Secret watch wakes this controller the moment it
+		// appears, so there is nothing to back off for.
+		return ReasonSourceNotFound, false
 	case errors.Is(err, domain.ErrExpired), errors.Is(err, domain.ErrNotYetValid):
 		return ReasonCertificateExpired, false
 	case errors.Is(err, domain.ErrNoCertificates),

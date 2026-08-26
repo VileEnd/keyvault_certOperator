@@ -37,8 +37,11 @@ func (s *SecretSource) Load(ctx context.Context, ref app.SecretRef) (*domain.Bun
 	key := types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}
 	if err := s.Reader.Get(ctx, key, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
+			// Wrapped so that apierrors.IsNotFound still reports true upstream:
+			// the controller distinguishes "not issued yet" from a real failure.
 			return nil, fmt.Errorf("secret %s not found "+
-				"(it must carry the %s=%s label to be visible to this operator): %w",
+				"(if it exists, check it carries the %s=%s label, without which it is "+
+				"outside this operator's cache): %w",
 				ref, v1alpha1.LabelManaged, v1alpha1.LabelManagedValue, err)
 		}
 		return nil, fmt.Errorf("reading secret %s: %w", ref, err)

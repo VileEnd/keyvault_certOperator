@@ -208,3 +208,66 @@ func TestSyncControllerReportsAnInvalidSourceWithoutRetryingForever(t *testing.T
 		t.Errorf("imports = %d, want 0 -- an expired certificate must never reach Azure", count)
 	}
 }
+
+func TestSyncControllerWaitsForACertificateThatDoesNotExistYet(t *testing.T) {
+	ctx := t.Context()
+	const namespace = "sync-pending"
+	const certName = "wildcard-pending-com"
+
+	if err := k8sClient.Create(ctx, newNamespace(namespace)); err != nil {
+		t.Fatalf("creating namespace: %v", err)
+	}
+
+	// A policy creates the sync resource alongside the cert-manager Certificate,
+	// so this ordering is the normal case rather than an edge case: the sync
+	// necessarily exists before cert-manager has issued anything.
+	sync := &v1alpha1.KeyVaultCertificateSync{
+		ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: namespace},
+		Spec: v1alpha1.KeyVaultCertificateSyncSpec{
+			Source:   v1alpha1.CertificateSourceSpec{SecretRef: v1alpha1.LocalSecretReference{Name: "pending-tls"}},
+			KeyVault: v1alpha1.KeyVaultSpec{Name: "my-vault", CertificateName: certName},
+		},
+	}
+	if err := k8sClient.Create(ctx, sync); err != nil {
+		t.Fatalf("creating sync: %v", err)
+	}
+
+	eventually(t, 30*time.Second, func() error {
+		var got v1alpha1.KeyVaultCertificateSync
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(sync), &got); err != nil {
+			return err
+		}
+		condition := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+		if condition == nil || condition.Status != metav1.ConditionFalse {
+			return fmt.Errorf("Ready = %+v, want False", condition)
+		}
+		// Reported as "waiting", not as a failure, so a normal startup ordering
+		// does not look like a broken operator.
+		if condition.Reason != "SourceNotFound" {
+			return fmt.Errorf("reason = %q, want SourceNotFound", condition.Reason)
+		}
+		return nil
+	})
+
+	// The Secret watch must pick it up as soon as cert-manager writes it.
+	root := testutil.NewRootCA(t, "test root")
+	leaf := root.Issue(t, testutil.LeafOptions{DNSNames: []string{"*.pending.com"}})
+	if err := k8sClient.Create(ctx, newTLSSecret(t, namespace, "pending-tls", leaf)); err != nil {
+		t.Fatalf("creating secret: %v", err)
+	}
+
+	eventually(t, 30*time.Second, func() error {
+		var got v1alpha1.KeyVaultCertificateSync
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(sync), &got); err != nil {
+			return err
+		}
+		if !meta.IsStatusConditionTrue(got.Status.Conditions, v1alpha1.ConditionReady) {
+			return fmt.Errorf("not ready: %+v", got.Status.Conditions)
+		}
+		return nil
+	})
+
+	if count := testVault.importCount(certName); count != 1 {
+		t.Errorf("imports = %d, want 1", count)
+	}
+}
