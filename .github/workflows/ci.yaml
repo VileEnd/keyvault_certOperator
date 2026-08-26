@@ -14,41 +14,51 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Kept in step with the go directive in go.mod. The toolchain directive will
-  # fetch a newer one automatically if the module needs it.
+  # Kept in step with the go directive in go.mod. The toolchain directive fetches
+  # a newer one automatically if the module needs it.
   GO_VERSION: "1.26"
 
 jobs:
+  build:
+    name: Build and vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go build ./...
+      - run: go vet ./...
+      # The end-to-end suite is behind a build tag, so vet it explicitly.
+      - run: go vet -tags e2e ./test/...
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.13.1
+      # Installed from the version pinned in the Makefile rather than a
+      # third-party action, so CI and a developer machine run the same linter.
+      - run: make lint
 
   test:
-    name: Test
+    name: Unit and envtest
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-      - name: go vet
-        run: go vet ./...
-      # Runs the unit suites and the envtest controller suite. setup-envtest
-      # fetches the API server binaries into ./bin.
       - name: Test
         run: make test
       - name: Upload coverage
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage
@@ -59,32 +69,33 @@ jobs:
     name: Generated files are current
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-      # Fails if the CRDs, RBAC or deepcopy code drift from the Go markers, or
-      # if the chart's copy of the CRDs is stale.
-      - name: Check manifests and deepcopy
-        run: make check-manifests
-      - name: Check the chart's CRDs
-        run: make check-helm-crds
+      # Fails if the CRDs, RBAC or deepcopy code drift from the Go markers, or if
+      # the chart's copy of the CRDs is stale.
+      - run: make check-manifests
+      - run: make check-helm-crds
 
   chart:
     name: Helm chart
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: azure/setup-helm@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          version: v3.19.0
-      - name: Lint
-        run: helm lint charts/keyvault-certoperator --set azure.clientId=00000000-0000-0000-0000-000000000000
-      - name: Render with defaults
-        run: helm template ci charts/keyvault-certoperator --set azure.clientId=00000000-0000-0000-0000-000000000000 > /dev/null
-      - name: Render with metrics and namespace scoping
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Install Helm
+        run: go install helm.sh/helm/v3/cmd/helm@v3.19.0
+      - name: Lint and render
         run: |
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          helm lint charts/keyvault-certoperator --set azure.clientId=00000000-0000-0000-0000-000000000000
+          helm template ci charts/keyvault-certoperator \
+            --set azure.clientId=00000000-0000-0000-0000-000000000000 > /dev/null
           helm template ci charts/keyvault-certoperator \
             --set azure.clientId=00000000-0000-0000-0000-000000000000 \
             --set metrics.enabled=true \
@@ -93,6 +104,7 @@ jobs:
             --set watchNamespaces="{cert-system}" > /dev/null
       - name: Refuse to render without an identity
         run: |
+          export PATH="$(go env GOPATH)/bin:$PATH"
           if helm template ci charts/keyvault-certoperator > /dev/null 2>&1; then
             echo "the chart rendered without azure.clientId; the guard is broken"
             exit 1
@@ -102,8 +114,8 @@ jobs:
     name: End-to-end (k3s)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -111,40 +123,51 @@ jobs:
         run: |
           curl -sfL https://get.k3s.io | sudo sh -s - \
             --disable traefik --disable metrics-server --disable local-storage \
-            --write-kubeconfig-mode 644
+            --disable servicelb --write-kubeconfig-mode 644
       - name: Wait for the node to be ready
+        env:
+          KUBECONFIG: /etc/rancher/k3s/k3s.yaml
         run: |
           for _ in $(seq 1 60); do
             if kubectl get nodes 2>/dev/null | grep -q ' Ready '; then break; fi
             sleep 5
           done
           kubectl get nodes
-        env:
-          KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      # Warm the module cache as the normal user so the sudo'd build is quick.
+      - name: Prime the build
+        run: go build ./cmd/manager
       # Root is required: the fake Key Vault binds port 443 under a real
-      # *.vault.azure.net name so the SDK's challenge-resource verification is
-      # exercised rather than disabled.
+      # *.vault.azure.net name, so the SDK's challenge-resource verification is
+      # exercised rather than switched off. It also writes /etc/hosts.
       - name: Run the end-to-end suite
         run: |
-          sudo -E env "PATH=$PATH" KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "GOPATH=$(go env GOPATH)" \
+            "GOMODCACHE=$(go env GOMODCACHE)" "GOCACHE=$(go env GOCACHE)" \
+            KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
             test/e2e/run.sh 2>&1 | tee e2e.log
+      - name: Fail if the suite skipped instead of running
+        run: |
           if grep -q -- "--- SKIP" e2e.log; then
-            echo "the end-to-end suite skipped instead of running"
+            echo "the end-to-end suite skipped instead of running:"
+            grep -- "--- SKIP" e2e.log
             exit 1
           fi
+          grep -q -- "--- PASS: TestOperatorSyncsACertificateIntoKeyVault" e2e.log
+          grep -q -- "--- PASS: TestOperatorDiscoversHostsAndRequestsCertificates" e2e.log
+      - name: Dump diagnostics on failure
+        if: failure()
+        env:
+          KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+        run: |
+          kubectl get keyvaultcertificatesyncs -A -o yaml || true
+          kubectl get wildcardcertificatepolicies -A -o yaml || true
+          sudo journalctl -u k3s --no-pager -n 100 || true
 
   image:
     name: Container image builds
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-buildx-action@v3
-      # Build only. Publishing is deliberately not wired up here.
-      - name: Build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: false
-          platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - uses: actions/checkout@v4
+      # Plain docker build: the runner already has Docker, and this keeps the
+      # gate free of third-party actions.
+      - run: docker build -t keyvault-certoperator:ci .
