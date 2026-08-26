@@ -1,6 +1,7 @@
 package pkcs12_test
 
 import (
+	"errors"
 	"testing"
 
 	gopkcs12 "software.sslmate.com/src/go-pkcs12"
@@ -120,5 +121,84 @@ func TestNewEncoder(t *testing.T) {
 	}
 	if _, err := pkcs12.NewEncoder("des3-but-fancy"); err == nil {
 		t.Error("expected an error for an unknown profile")
+	}
+}
+
+func TestEncodeRejectsANilBundle(t *testing.T) {
+	t.Parallel()
+	encoder, err := pkcs12.NewEncoder(pkcs12.ProfileLegacy)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	if _, _, err := encoder.Encode(nil); !errors.Is(err, domain.ErrNoCertificates) {
+		t.Errorf("Encode(nil) = %v, want ErrNoCertificates", err)
+	}
+}
+
+func TestModernProfileUsesAHighEntropyPassword(t *testing.T) {
+	t.Parallel()
+	// Modern2023 applies real encryption, so a low-entropy password would be a
+	// genuine weakness rather than a formality. Two encodings must also not
+	// reuse the same password.
+	root := testutil.NewRootCA(t, "test root")
+	leaf := root.Issue(t, testutil.LeafOptions{DNSNames: []string{"*.x.com"}})
+	bundle, err := domain.ParseBundle(leaf.CertPEM(t), leaf.KeyPEM(t, testutil.PKCS8))
+	if err != nil {
+		t.Fatalf("ParseBundle: %v", err)
+	}
+
+	encoder, err := pkcs12.NewEncoder(pkcs12.ProfileModern)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+
+	_, first, err := encoder.Encode(bundle)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	_, second, err := encoder.Encode(bundle)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+
+	if len(first) < 32 {
+		t.Errorf("password length = %d, want a high-entropy value", len(first))
+	}
+	if first == second {
+		t.Error("the same password was reused across encodings")
+	}
+}
+
+func TestLegacyProfileIsTheDefault(t *testing.T) {
+	t.Parallel()
+	// The default must be the 3DES/SHA-1 profile: Azure's Application Gateway
+	// troubleshooting guidance names TripleDES-SHA1 as the maximum-compatibility
+	// encoding and warns that some Azure services cannot parse AES-256-CBC.
+	root := testutil.NewRootCA(t, "test root")
+	leaf := root.Issue(t, testutil.LeafOptions{DNSNames: []string{"*.x.com"}})
+	bundle, err := domain.ParseBundle(leaf.CertPEM(t), leaf.KeyPEM(t, testutil.PKCS8))
+	if err != nil {
+		t.Fatalf("ParseBundle: %v", err)
+	}
+
+	defaulted, err := pkcs12.NewEncoder("")
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	explicit, err := pkcs12.NewEncoder(pkcs12.ProfileLegacy)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+
+	_, defaultedPassword, err := defaulted.Encode(bundle)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	_, explicitPassword, err := explicit.Encode(bundle)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if defaultedPassword != explicitPassword {
+		t.Errorf("the empty profile did not default to legacy: %q vs %q", defaultedPassword, explicitPassword)
 	}
 }

@@ -200,10 +200,21 @@ optional: a required zone allowlist, a Public Suffix List check that makes
 reported in `status.skippedHosts` with a reason — never dropped silently.
 
 **Wildcards match exactly one label.** `*.x.com` covers `a.x.com` but neither
-`x.com` nor `a.b.x.com`. The apex is added as its own SAN and a deeper host gets
-a wildcard for its immediate parent. Application Gateway allows at most **five
-host names per listener**, so `status.applicationGateway.listeners` is
-pre-split to respect that.
+`x.com` nor `a.b.x.com` — Application Gateway's own docs state this outright. The
+apex is added as its own SAN and a deeper host gets a wildcard for its immediate
+parent. A listener accepts at most **five host names**, and a listener serving
+several needs a **SAN certificate** covering them, so
+`status.applicationGateway.listeners` is pre-split to respect both rules.
+
+**The certificate format follows Azure's stated requirements.** Full chain with
+the leaf first (the root is documented as optional, which is why Let's Encrypt's
+`fullchain` works); TripleDES-SHA1 encryption, which Azure names as the
+maximum-compatibility choice and which is what the default `legacy` profile
+produces; private key included; `contentType: application/x-pkcs12`. Switching to
+`modern` produces AES-256-CBC, which the same Azure page lists as a known cause
+of certificate failures — test it before adopting it. No `commonName` is set on
+generated certificates, following cert-manager's explicit guidance that TLS
+clients ignore it whenever SANs are present.
 
 **Least privilege throughout.** Secrets are read-only and cache-restricted by
 label. The Azure identity is scoped to a single vault. The operator needs no
@@ -242,8 +253,25 @@ Requires Go 1.26 (the toolchain directive fetches it automatically). Everything
 else — controller-gen, setup-envtest, golangci-lint, kustomize — is installed
 into `./bin` on demand.
 
-The domain layer needs neither a cluster nor an Azure account, and the Key Vault
-adapter is tested against the Azure SDK's own fake server transport.
+### Test layers
+
+| Layer | What it runs against | Needs |
+|---|---|---|
+| `internal/domain` | A generated test CA covering RSA and ECDSA, PKCS#8 / PKCS#1 / SEC1 keys, wildcard SANs, out-of-order and broken chains, expired certificates | nothing |
+| `internal/app` | Hand-written fakes for the four ports | nothing |
+| `internal/infra/pkcs12` | Real encode/decode round trips across all three profiles | nothing |
+| `internal/infra/azure` | The Azure SDK's own fake server transport, driving the real client pipeline | nothing |
+| `internal/infra/kube` | controller-runtime's fake client | nothing |
+| `internal/controller` | envtest: a real API server, both controllers, a fake vault | envtest binaries |
+
+Everything except the controller suite runs with no cluster and no Azure account.
+The controller suite skips cleanly if the envtest binaries are missing, so
+`go test ./...` is still useful on a bare checkout.
+
+The assertion that matters most is in the controller suite: after the first
+import, a repeatedly-reconciled unchanged certificate must produce **zero**
+further imports. Key Vault versions are permanent and each one is a candidate
+Application Gateway rotation, so a regression there degrades the vault quietly.
 
 ## Not in scope
 

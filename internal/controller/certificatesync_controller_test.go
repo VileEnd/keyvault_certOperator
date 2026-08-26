@@ -5,7 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"slices"
+
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
@@ -16,6 +19,7 @@ import (
 )
 
 func TestSyncControllerImportsOnceAndThenLeavesKeyVaultAlone(t *testing.T) {
+	requireEnvtest(t)
 	ctx := t.Context()
 	const namespace = "sync-steady-state"
 	const certName = "wildcard-steady-com"
@@ -99,6 +103,7 @@ func TestSyncControllerImportsOnceAndThenLeavesKeyVaultAlone(t *testing.T) {
 }
 
 func TestSyncControllerImportsAgainWhenTheCertificateIsRenewed(t *testing.T) {
+	requireEnvtest(t)
 	ctx := t.Context()
 	const namespace = "sync-renewal"
 	const certName = "wildcard-renewal-com"
@@ -157,6 +162,7 @@ func TestSyncControllerImportsAgainWhenTheCertificateIsRenewed(t *testing.T) {
 }
 
 func TestSyncControllerReportsAnInvalidSourceWithoutRetryingForever(t *testing.T) {
+	requireEnvtest(t)
 	ctx := t.Context()
 	const namespace = "sync-invalid"
 
@@ -210,6 +216,7 @@ func TestSyncControllerReportsAnInvalidSourceWithoutRetryingForever(t *testing.T
 }
 
 func TestSyncControllerWaitsForACertificateThatDoesNotExistYet(t *testing.T) {
+	requireEnvtest(t)
 	ctx := t.Context()
 	const namespace = "sync-pending"
 	const certName = "wildcard-pending-com"
@@ -269,5 +276,78 @@ func TestSyncControllerWaitsForACertificateThatDoesNotExistYet(t *testing.T) {
 
 	if count := testVault.importCount(certName); count != 1 {
 		t.Errorf("imports = %d, want 1", count)
+	}
+}
+
+func TestSyncControllerDeletionLeavesTheKeyVaultCertificateAlone(t *testing.T) {
+	requireEnvtest(t)
+	ctx := t.Context()
+	const namespace = "sync-deletion"
+	const certName = "wildcard-deletion-com"
+
+	if err := k8sClient.Create(ctx, newNamespace(namespace)); err != nil {
+		t.Fatalf("creating namespace: %v", err)
+	}
+
+	root := testutil.NewRootCA(t, "test root")
+	leaf := root.Issue(t, testutil.LeafOptions{DNSNames: []string{"*.deletion.com"}})
+	if err := k8sClient.Create(ctx, newTLSSecret(t, namespace, "deletion-tls", leaf)); err != nil {
+		t.Fatalf("creating secret: %v", err)
+	}
+
+	sync := &v1alpha1.KeyVaultCertificateSync{
+		ObjectMeta: metav1.ObjectMeta{Name: "deletion", Namespace: namespace},
+		Spec: v1alpha1.KeyVaultCertificateSyncSpec{
+			Source:   v1alpha1.CertificateSourceSpec{SecretRef: v1alpha1.LocalSecretReference{Name: "deletion-tls"}},
+			KeyVault: v1alpha1.KeyVaultSpec{Name: "my-vault", CertificateName: certName},
+		},
+	}
+	if err := k8sClient.Create(ctx, sync); err != nil {
+		t.Fatalf("creating sync: %v", err)
+	}
+
+	key := client.ObjectKeyFromObject(sync)
+	eventually(t, 30*time.Second, func() error {
+		var got v1alpha1.KeyVaultCertificateSync
+		if err := k8sClient.Get(ctx, key, &got); err != nil {
+			return err
+		}
+		// The finalizer makes deletion observable and orderly. It must never
+		// block on Azure.
+		if !slices.Contains(got.Finalizers, v1alpha1.FinalizerName) {
+			return fmt.Errorf("finalizer not set: %v", got.Finalizers)
+		}
+		if !meta.IsStatusConditionTrue(got.Status.Conditions, v1alpha1.ConditionReady) {
+			return fmt.Errorf("not ready: %+v", got.Status.Conditions)
+		}
+		return nil
+	})
+
+	if !testVault.exists(certName) {
+		t.Fatal("precondition failed: the certificate should be in the vault")
+	}
+
+	if err := k8sClient.Delete(ctx, sync); err != nil {
+		t.Fatalf("deleting sync: %v", err)
+	}
+
+	// The resource must actually go away -- a finalizer that cannot complete
+	// would wedge namespace deletion.
+	eventually(t, 30*time.Second, func() error {
+		var got v1alpha1.KeyVaultCertificateSync
+		err := k8sClient.Get(ctx, key, &got)
+		if err == nil {
+			return fmt.Errorf("still present with finalizers %v", got.Finalizers)
+		}
+		if !apierrors.IsNotFound(err) {
+			return err
+		}
+		return nil
+	})
+
+	// And Key Vault must be untouched. Application Gateway may still be serving
+	// this certificate; deleting it would disable the listener.
+	if !testVault.exists(certName) {
+		t.Error("the Key Vault certificate was removed on deletion; it must be left in place")
 	}
 }

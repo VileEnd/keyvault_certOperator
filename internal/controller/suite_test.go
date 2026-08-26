@@ -72,6 +72,20 @@ func (v *recordingVault) Import(_ context.Context, ref app.VaultRef, req app.Imp
 	return app.ImportResult{Version: version}, nil
 }
 
+// seed records a certificate as already present in the vault.
+func (v *recordingVault) seed(name string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.stored[name] = domain.VaultSnapshot{Exists: true, Enabled: true}
+}
+
+func (v *recordingVault) exists(name string) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	_, ok := v.stored[name]
+	return ok
+}
+
 func (v *recordingVault) importCount(name string) int {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -82,11 +96,16 @@ func TestMain(m *testing.M) {
 	os.Exit(runSuite(m))
 }
 
+// envtestReady reports whether the API server came up. When it did not, the
+// envtest-backed tests skip individually rather than the whole package silently
+// reporting success -- the pure unit tests in this package still run.
+var envtestReady bool
+
 func runSuite(m *testing.M) int {
 	assets, err := envTestAssets()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "skipping controller suite: %v\n", err)
-		return 0
+		fmt.Fprintf(os.Stderr, "envtest binaries unavailable, running unit tests only: %v\n", err)
+		return m.Run()
 	}
 
 	utilMust(clientgoscheme.AddToScheme(testScheme))
@@ -107,6 +126,7 @@ func runSuite(m *testing.M) int {
 		fmt.Fprintf(os.Stderr, "starting envtest: %v\n", err)
 		return 1
 	}
+	envtestReady = true
 	defer func() {
 		if err := testEnv.Stop(); err != nil {
 			fmt.Fprintf(os.Stderr, "stopping envtest: %v\n", err)
@@ -224,6 +244,14 @@ func envTestAssets() (string, error) {
 func utilMust(err error) {
 	if err != nil {
 		panic(err)
+	}
+}
+
+// requireEnvtest skips a test that needs a live API server.
+func requireEnvtest(t *testing.T) {
+	t.Helper()
+	if !envtestReady {
+		t.Skip("envtest binaries unavailable; run 'make setup-envtest' to enable this test")
 	}
 }
 

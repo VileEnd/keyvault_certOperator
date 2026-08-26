@@ -118,10 +118,18 @@ path to it:
 - **Operator:** the AKS node subnet needs its own rule or the same private
   endpoint. The operator pod is not an Azure trusted service and gets no bypass.
 
-Microsoft's documentation contradicts itself on whether Application Gateway v2
-counts as a Key Vault trusted service. Do not rely on the bypass either way —
-configure the subnet or private endpoint explicitly and the question stops
-mattering.
+Microsoft's own pages disagree here, and the more specific one wins. The
+Application Gateway certificate troubleshooting guide is unambiguous:
+
+> Application Gateway v2 doesn't appear on the Key Vault trusted services list.
+> Even if `bypass: "AzureServices"` is set, the Application Gateway subnet must
+> be explicitly added to the Key Vault network rules, or a private endpoint must
+> be configured.
+
+The older "TLS termination with Key Vault certificates" page still describes
+Application Gateway as a recognised trusted service. **Do not rely on the
+bypass.** Configure the subnet rule or the private endpoint explicitly and the
+contradiction stops mattering.
 
 ## Monitoring
 
@@ -156,21 +164,35 @@ Error codes worth recognising: `ApplicationGatewayKeyVaultSecretException`,
 `SecretDeletedFromKeyVault`, `KeyVaultHasRestrictedAccess`, `KeyVaultSoftDeleted`,
 `UserAssignedManagedIdentityNotFound`.
 
-## Two things to verify on your own gateway
+## Certificate format: settled, not guesswork
 
-Microsoft's documentation is genuinely ambiguous on both, and both are cheap to
-test:
+Both of these were open questions during the build and are now answered directly
+by Azure's Application Gateway certificate requirements table:
 
-1. **Does your gateway accept a chain without the root?** One page asks for the
-   entire chain "including the root"; another says the root is optional. Let's
-   Encrypt's `fullchain` contains leaf and intermediate only. In practice this
-   works because ISRG Root X1 is in every trust store — but confirm it rather
-   than assume it.
-2. **Does the default PKCS#12 profile work for you?** The operator defaults to
-   `legacy` (3DES/SHA-1), which is the profile Azure's troubleshooting guidance
-   asks for by name, because some Azure services cannot parse AES-256-CBC
-   archives. If your vault and gateway are happy with modern algorithms, set
-   `syncPolicy.pkcs12Profile: modern`.
+| Requirement | Azure's wording | What the operator does |
+|---|---|---|
+| Chain | *"Full chain: leaf → intermediate(s) → root (root is optional but recommended)"* | Sends leaf + intermediates. Let's Encrypt's `fullchain` has no root, and that is accepted. |
+| Encryption | *"TripleDES-SHA1 recommended (maximum compatibility)"* | Defaults to the `legacy` profile, which is exactly TripleDES-SHA1. |
+| Password | *"Can be blank or have a password (Key Vault handles this)"* | Either works; Key Vault strips it on import. |
+| Private key | *"Must be included"* | Always included. |
+| Format | PKCS#12 (PFX) or PEM | PKCS#12, with `contentType: application/x-pkcs12`. |
 
-Test both against the Let's Encrypt **staging** issuer first, so a mistake cannot
-burn your production rate limit.
+**Do not switch to `pkcs12Profile: modern` without testing.** The same Azure page
+lists *"The PFX file uses a nonstandard encryption algorithm (for example,
+`AES-256-CBC` instead of `TripleDES-SHA1`)"* as a known cause of certificate
+failures — and AES-256-CBC is precisely what the `modern` profile produces. The
+`legacy` default is the documented-compatible choice, and the weak encryption is
+irrelevant here: the archive exists only in memory for one call to Key Vault,
+which then strips the password and re-encodes it anyway.
+
+**No `commonName` is set on the generated certificates.** cert-manager's own
+guidance is explicit — *"Avoid using commonName for DNS names in end-entity
+(leaf) certificates… use dnsNames exclusively"* — because TLS clients ignore the
+common name whenever subject alternative names are present, and a value over 64
+characters gets the CSR rejected outright. The SANs are what Application Gateway
+matches on.
+
+Still worth doing once against a scratch vault before you trust it in
+production: import a certificate, point a test listener at it, and confirm the
+gateway serves it. Use the Let's Encrypt **staging** issuer for that, so a
+mistake cannot burn your production rate limit.
