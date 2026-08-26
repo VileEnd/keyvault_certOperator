@@ -1,0 +1,15 @@
+apiVersion: v2
+name: keyvault-certoperator
+description: Syncs Kubernetes TLS certificates, including discovered wildcards, into Azure Key Vault for Application Gateway.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - azure
+  - key-vault
+  - application-gateway
+  - cert-manager
+  - tls
+home: https://github.com/VileEnd/keyvault_certOperator
+sources:
+  - https://github.com/VileEnd/keyvault_certOperator

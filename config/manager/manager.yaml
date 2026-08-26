@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: system
+  labels:
+    control-plane: controller-manager
+    # The operator meets the restricted Pod Security Standard.
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-manager
+  namespace: system
+  labels:
+    control-plane: controller-manager
+spec:
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+  replicas: 1
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        control-plane: controller-manager
+        # REQUIRED for Azure Workload Identity. Without this label the mutating
+        # webhook skips the pod, no federated token is projected, and the
+        # operator fails on its next restart rather than at deploy time.
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: controller-manager
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: manager
+        image: controller:latest
+        args:
+        - --leader-elect
+        - --health-probe-bind-address=:8081
+        - --metrics-bind-address=:8443
+        - --metrics-secure=true
+        # Workload identity is the default; it is spelled out here so that a
+        # change to something weaker is visible in review.
+        - --azure-credential=workload-identity
+        ports:
+        - name: metrics
+          containerPort: 8443
+          protocol: TCP
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          # Memory scales with the number of cached objects. The Secret cache is
+          # restricted by label, so this stays modest -- but measure it against
+          # your own Ingress count before trusting the limit.
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi

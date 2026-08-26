@@ -1,0 +1,90 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "keyvault-certoperator.fullname" . }}
+  labels:
+    {{- include "keyvault-certoperator.labels" . | nindent 4 }}
+rules:
+# Secrets are read-only. The operator never creates, updates or deletes one, and
+# its cache is further restricted to Secrets carrying
+# certsync.vileend.io/managed=true, so unrelated private keys never enter memory.
+- apiGroups: [""]
+  resources: ["secrets", "namespaces"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources: ["httproutes"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["cert-manager.io"]
+  resources: ["certificates"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["certsync.vileend.io"]
+  resources: ["keyvaultcertificatesyncs", "wildcardcertificatepolicies"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["certsync.vileend.io"]
+  resources: ["keyvaultcertificatesyncs/status", "wildcardcertificatepolicies/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["certsync.vileend.io"]
+  resources: ["keyvaultcertificatesyncs/finalizers", "wildcardcertificatepolicies/finalizers"]
+  verbs: ["update"]
+- apiGroups: ["events.k8s.io"]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+{{- if .Values.metrics.enabled }}
+- apiGroups: ["authentication.k8s.io"]
+  resources: ["tokenreviews"]
+  verbs: ["create"]
+- apiGroups: ["authorization.k8s.io"]
+  resources: ["subjectaccessreviews"]
+  verbs: ["create"]
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "keyvault-certoperator.fullname" . }}
+  labels:
+    {{- include "keyvault-certoperator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "keyvault-certoperator.fullname" . }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "keyvault-certoperator.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+{{- if .Values.leaderElection.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "keyvault-certoperator.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "keyvault-certoperator.labels" . | nindent 4 }}
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["events.k8s.io"]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "keyvault-certoperator.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "keyvault-certoperator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "keyvault-certoperator.fullname" . }}-leader-election
+subjects:
+- kind: ServiceAccount
+  name: {{ include "keyvault-certoperator.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}

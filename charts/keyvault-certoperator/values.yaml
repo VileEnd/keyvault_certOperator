@@ -1,0 +1,85 @@
+image:
+  repository: ghcr.io/vileend/keyvault-certoperator
+  tag: ""            # defaults to the chart's appVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+replicaCount: 1
+
+azure:
+  # Client ID of the user-assigned managed identity holding
+  # "Key Vault Certificates Officer" on the target vault. Required.
+  clientId: ""
+  # Tenant ID. Optional: the workload identity webhook supplies a default.
+  tenantId: ""
+  # workload-identity (default) or default. Use "default" only for local
+  # development against a real vault; it enables the full credential chain.
+  credentialMode: workload-identity
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Restrict the operator to specific namespaces. Empty means all namespaces.
+watchNamespaces: []
+
+leaderElection:
+  enabled: true
+
+metrics:
+  # Disabled by default. When enabled the endpoint is served over HTTPS and
+  # gated by TokenReview and SubjectAccessReview.
+  enabled: false
+  port: 8443
+  service:
+    create: false
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+# The defaults below satisfy the restricted Pod Security Standard. Weakening
+# them is visible in review, which is the point of spelling them out.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+logging:
+  # Set to true for human-readable logs during development.
+  development: false
+
+# Extra environment variables for the manager container. Useful for a proxy, a
+# custom CA bundle via SSL_CERT_FILE, or AZURE_AUTHORITY_HOST in a sovereign
+# cloud. Normally leave empty: the workload identity webhook injects the AZURE_*
+# variables itself.
+extraEnv: []
+  # - name: HTTPS_PROXY
+  #   value: http://proxy.internal:3128
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+podLabels: {}
+priorityClassName: ""

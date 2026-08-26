@@ -1,0 +1,15 @@
+{
+  "Name": "Key Vault Certificate Importer",
+  "IsCustom": true,
+  "Description": "Read and import Key Vault certificates. Narrower than the built-in Key Vault Certificates Officer, which also permits delete and purge.",
+  "Actions": [],
+  "NotActions": [],
+  "DataActions": [
+    "Microsoft.KeyVault/vaults/certificates/read",
+    "Microsoft.KeyVault/vaults/certificates/import/action"
+  ],
+  "NotDataActions": [],
+  "AssignableScopes": [
+    "/subscriptions/REPLACE-WITH-SUBSCRIPTION-ID"
+  ]
+}

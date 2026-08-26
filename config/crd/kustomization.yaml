@@ -1,0 +1,3 @@
+resources:
+- bases/certsync.vileend.io_keyvaultcertificatesyncs.yaml
+- bases/certsync.vileend.io_wildcardcertificatepolicies.yaml

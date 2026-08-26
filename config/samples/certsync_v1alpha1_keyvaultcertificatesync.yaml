@@ -1,0 +1,26 @@
+# Syncs one existing TLS Secret into one Key Vault certificate. Use this when you
+# manage certificates yourself and only want the Key Vault half.
+#
+# The Secret must be of type kubernetes.io/tls and must carry the label
+#   certsync.vileend.io/managed: "true"
+# or it will be outside the operator's cache and invisible to it.
+apiVersion: certsync.vileend.io/v1alpha1
+kind: KeyVaultCertificateSync
+metadata:
+  name: wildcard-x-com
+  namespace: cert-system
+spec:
+  source:
+    secretRef:
+      name: wildcard-x-com-tls
+  keyVault:
+    name: my-vault
+    # Optional. Defaults to a name derived from the certificate's SANs, e.g.
+    # "*.x.com" becomes "wildcard-x-com". Set it explicitly if you care about
+    # the exact name -- an Application Gateway listener references it.
+    certificateName: wildcard-x-com
+  syncPolicy:
+    resyncInterval: 1h
+    # legacy (3DES/SHA-1) is the profile Azure's Application Gateway
+    # troubleshooting guidance asks for by name.
+    pkcs12Profile: legacy

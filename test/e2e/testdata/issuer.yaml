@@ -1,0 +1,75 @@
+# A two-level certificate authority: a self-signed root, an intermediate issued
+# from it, and a CA ClusterIssuer backed by the *intermediate*.
+#
+# The two levels are the point. A root-only CA issues leaf certificates with no
+# intermediate, so cert-manager writes a tls.crt containing just the leaf and
+# there is no chain to carry. Real issuers do not look like that: Let's Encrypt
+# signs from an intermediate, so tls.crt is leaf + intermediate, and Application
+# Gateway needs that intermediate to travel all the way into Key Vault. This
+# mirrors that shape so the test actually exercises it.
+#
+# A local CA is used rather than ACME because wildcards require a DNS-01 solver
+# and public DNS. What needs proving here is everything downstream of issuance.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: e2e-selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: e2e-root
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: keyvault-certoperator-e2e-root
+  secretName: e2e-root-tls
+  # Comfortably longer than the leaves it will ultimately sign for -- a leaf
+  # that outlives its own issuer is legal x509 but not what a real PKI looks
+  # like, and the point of this CA is to look real.
+  duration: 8760h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: e2e-selfsigned
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: e2e-root-issuer
+spec:
+  ca:
+    # A ClusterIssuer reads its secret from cert-manager's cluster resource
+    # namespace, which is where the certificates above are issued.
+    secretName: e2e-root-tls
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: e2e-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: keyvault-certoperator-e2e-intermediate
+  secretName: e2e-ca-tls
+  duration: 4380h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: e2e-root-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: e2e-ca-issuer
+spec:
+  ca:
+    secretName: e2e-ca-tls
