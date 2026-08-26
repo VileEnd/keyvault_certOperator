@@ -145,13 +145,12 @@ jobs:
             "GOMODCACHE=$(go env GOMODCACHE)" "GOCACHE=$(go env GOCACHE)" \
             KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
             test/e2e/run.sh 2>&1 | tee e2e.log
-      - name: Fail if the suite skipped instead of running
+      # Asserted by name rather than by "no skips": a skip would otherwise look
+      # exactly like a pass and quietly remove the only coverage of RBAC
+      # sufficiency and the Azure wire protocol. The cert-manager test is
+      # expected to skip here; it has its own job.
+      - name: Assert the suite ran
         run: |
-          if grep -q -- "--- SKIP" e2e.log; then
-            echo "the end-to-end suite skipped instead of running:"
-            grep -- "--- SKIP" e2e.log
-            exit 1
-          fi
           grep -q -- "--- PASS: TestOperatorSyncsACertificateIntoKeyVault" e2e.log
           grep -q -- "--- PASS: TestOperatorDiscoversHostsAndRequestsCertificates" e2e.log
       - name: Dump diagnostics on failure
@@ -163,6 +162,59 @@ jobs:
           kubectl get wildcardcertificatepolicies -A -o yaml || true
           sudo journalctl -u k3s --no-pager -n 100 || true
 
+  e2e-fullstack:
+    name: End-to-end with cert-manager issuing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Start k3s
+        run: |
+          curl -sfL https://get.k3s.io | sudo sh -s - \
+            --disable traefik --disable metrics-server --disable local-storage \
+            --disable servicelb --write-kubeconfig-mode 644
+      - name: Wait for the node to be ready
+        env:
+          KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+        run: |
+          for _ in $(seq 1 60); do
+            if kubectl get nodes 2>/dev/null | grep -q ' Ready '; then break; fi
+            sleep 5
+          done
+          kubectl get nodes
+      - name: Prime the build
+        run: go build ./cmd/manager
+      # The whole pipeline: the policy plans a wildcard, the operator asks
+      # cert-manager for it, cert-manager genuinely issues it, and the operator
+      # imports the result into the mock Key Vault. Nothing hand-writes the
+      # Secret here -- cert-manager does.
+      - name: Run the end-to-end suite with cert-manager
+        run: |
+          sudo -E env "PATH=$PATH" "HOME=$HOME" "GOPATH=$(go env GOPATH)" \
+            "GOMODCACHE=$(go env GOMODCACHE)" "GOCACHE=$(go env GOCACHE)" \
+            KUBECONFIG=/etc/rancher/k3s/k3s.yaml E2E_CERT_MANAGER=1 \
+            test/e2e/run.sh 2>&1 | tee e2e-fullstack.log
+      - name: Assert cert-manager actually issued and the operator synced it
+        run: |
+          if grep -q -- "--- SKIP: TestCertManagerIssuesAndTheOperatorSyncsItToKeyVault" e2e-fullstack.log; then
+            echo "the cert-manager test skipped; cert-manager was expected to be installed"
+            exit 1
+          fi
+          grep -q -- "--- PASS: TestCertManagerIssuesAndTheOperatorSyncsItToKeyVault" e2e-fullstack.log
+      - name: Dump diagnostics on failure
+        if: failure()
+        env:
+          KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+        run: |
+          kubectl get certificates.cert-manager.io -A -o wide || true
+          kubectl get certificaterequests.cert-manager.io -A -o wide || true
+          kubectl describe certificates.cert-manager.io -n e2e-certs || true
+          kubectl get keyvaultcertificatesyncs -A -o yaml || true
+          kubectl logs -n cert-manager deployment/cert-manager --tail=100 || true
+
   image:
     name: Container image builds
     runs-on: ubuntu-latest
@@ -171,3 +223,91 @@ jobs:
       # Plain docker build: the runner already has Docker, and this keeps the
       # gate free of third-party actions.
       - run: docker build -t keyvault-certoperator:ci .
+
+  deploy:
+    name: Deploys and runs in-cluster
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Build the image
+        run: docker build -t keyvault-certoperator:ci .
+      - name: Start k3s
+        run: |
+          curl -sfL https://get.k3s.io | sudo sh -s - \
+            --disable traefik --disable metrics-server --disable local-storage \
+            --disable servicelb --write-kubeconfig-mode 644
+      - name: Wait for the node to be ready
+        env:
+          KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+        run: |
+          for _ in $(seq 1 60); do
+            if kubectl get nodes 2>/dev/null | grep -q ' Ready '; then break; fi
+            sleep 5
+          done
+      - name: Load the image into k3s
+        run: docker save keyvault-certoperator:ci | sudo k3s ctr images import -
+      - name: Install Helm
+        run: go install helm.sh/helm/v3/cmd/helm@v3.19.0
+      # The Azure Workload Identity webhook is not installed on this cluster, so
+      # the AZURE_* variables it would inject are supplied by hand. The
+      # credential constructor only checks that they are present -- it never
+      # reads the token file -- so this reproduces production startup exactly
+      # without any Azure being reachable.
+      - name: Install the chart
+        env:
+          KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+        run: |
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          helm upgrade --install keyvault-certoperator ./charts/keyvault-certoperator \
+            --namespace keyvault-certoperator-system --create-namespace \
+            --set image.repository=keyvault-certoperator \
+            --set image.tag=ci \
+            --set image.pullPolicy=Never \
+            --set azure.clientId=00000000-0000-0000-0000-000000000000 \
+            --set 'extraEnv[0].name=AZURE_CLIENT_ID' \
+            --set 'extraEnv[0].value=00000000-0000-0000-0000-000000000000' \
+            --set 'extraEnv[1].name=AZURE_TENANT_ID' \
+            --set 'extraEnv[1].value=11111111-1111-1111-1111-111111111111' \
+            --set 'extraEnv[2].name=AZURE_FEDERATED_TOKEN_FILE' \
+            --set 'extraEnv[2].value=/var/run/secrets/azure/tokens/azure-identity-token' \
+            --wait --timeout 5m
+      # The operator has no Azure to reach here, and that is the point: neither
+      # probe may depend on Key Vault. If they did, an Azure outage would turn
+      # into a CrashLoopBackOff and cost the operator its leader election.
+      - name: Assert it becomes ready without any Azure reachable
+        env:
+          KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+        run: |
+          kubectl rollout status -n keyvault-certoperator-system \
+            deployment/keyvault-certoperator --timeout=5m
+          kubectl get pods -n keyvault-certoperator-system -o wide
+      - name: Assert the hardened pod spec is actually in effect
+        env:
+          KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+        run: |
+          pod=$(kubectl get pods -n keyvault-certoperator-system \
+            -l app.kubernetes.io/name=keyvault-certoperator -o name | head -1)
+          echo "inspecting $pod"
+          test "$(kubectl get -n keyvault-certoperator-system "$pod" \
+            -o jsonpath='{.spec.securityContext.runAsNonRoot}')" = "true"
+          test "$(kubectl get -n keyvault-certoperator-system "$pod" \
+            -o jsonpath='{.spec.containers[0].securityContext.readOnlyRootFilesystem}')" = "true"
+          test "$(kubectl get -n keyvault-certoperator-system "$pod" \
+            -o jsonpath='{.spec.containers[0].securityContext.allowPrivilegeEscalation}')" = "false"
+          # Required by Azure Workload Identity; without it the webhook skips the
+          # pod and the operator fails on its next restart rather than at deploy.
+          test "$(kubectl get -n keyvault-certoperator-system "$pod" \
+            -o jsonpath='{.metadata.labels.azure\.workload\.identity/use}')" = "true"
+      - name: Dump diagnostics on failure
+        if: failure()
+        env:
+          KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+        run: |
+          kubectl describe deployment -n keyvault-certoperator-system keyvault-certoperator || true
+          kubectl describe pods -n keyvault-certoperator-system || true
+          kubectl logs -n keyvault-certoperator-system \
+            -l app.kubernetes.io/name=keyvault-certoperator --tail=200 || true

@@ -173,3 +173,7 @@ e2e-cleanup: ## Remove what the end-to-end suite created.
 	-kubectl delete namespace keyvault-certoperator-e2e e2e-certs e2e-apps --ignore-not-found
 	-kubectl delete clusterrolebinding keyvault-certoperator-e2e --ignore-not-found
 	-kubectl delete wildcardcertificatepolicy e2e-discovery --ignore-not-found
+
+.PHONY: e2e-fullstack
+e2e-fullstack: manifests generate ## Run the end-to-end suite with cert-manager actually issuing certificates.
+	E2E_CERT_MANAGER=1 test/e2e/run.sh

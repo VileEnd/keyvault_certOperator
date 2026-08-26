@@ -69,6 +69,14 @@ logging:
   # Set to true for human-readable logs during development.
   development: false
 
+# Extra environment variables for the manager container. Useful for a proxy, a
+# custom CA bundle via SSL_CERT_FILE, or AZURE_AUTHORITY_HOST in a sovereign
+# cloud. Normally leave empty: the workload identity webhook injects the AZURE_*
+# variables itself.
+extraEnv: []
+  # - name: HTTPS_PROXY
+  #   value: http://proxy.internal:3128
+
 nodeSelector: {}
 tolerations: []
 affinity: {}

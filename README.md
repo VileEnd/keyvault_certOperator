@@ -265,6 +265,7 @@ into `./bin` on demand.
 | `internal/controller` | envtest: a real API server, both controllers, a fake vault | envtest binaries |
 
 | `test/e2e` | A real cluster, the real built binary, a real HTTPS Key Vault endpoint | a cluster (`make e2e`) |
+| `test/e2e` full stack | The above **plus cert-manager actually issuing** the certificate | a cluster + cert-manager (`make e2e-fullstack`) |
 
 Everything except the controller and e2e suites runs with no cluster and no Azure
 account. The controller suite skips cleanly if the envtest binaries are missing,
@@ -301,6 +302,38 @@ What this covers that envtest cannot: the generated ClusterRole is sufficient;
 the Azure request is well formed on the wire (TLS, challenge, token, base64, the
 certificate policy shape, tags, content type); `cmd/manager` actually wires up
 and runs, label-scoped cache included.
+
+### Full stack, with cert-manager issuing
+
+```bash
+make e2e-fullstack
+```
+
+The plain suite hand-writes the TLS Secret, so nothing before that point is
+proven. This one installs cert-manager, creates a self-signed root and a CA
+`ClusterIssuer` from it, and then exercises the whole pipeline with nobody
+faking the middle:
+
+```
+Ingress hostnames
+  -> the policy plans a covering wildcard
+  -> the operator creates a cert-manager Certificate
+  -> cert-manager actually issues it and writes the Secret
+  -> the Secret carries the managed label, so it is inside the operator's cache
+  -> the operator parses it and imports it into the mock Key Vault
+```
+
+A local CA is used rather than ACME because wildcards require a DNS-01 solver and
+public DNS, and what needs proving here is everything *after* issuance. The test
+asserts the certificate that reached Key Vault carries the wildcard and apex
+SANs, arrived as PKCS#12 with its issuing chain, and was imported exactly once.
+
+CI additionally installs the chart into k3s with the freshly built image and
+asserts the operator becomes ready **with no Azure reachable at all** — a
+deliberate design property, since probes that depended on Key Vault would turn an
+Azure outage into a CrashLoopBackOff — and that the hardened pod spec
+(`runAsNonRoot`, `readOnlyRootFilesystem`, no privilege escalation, the workload
+identity label) is actually in effect on the running pod.
 
 The assertion that matters most is in the controller suite: after the first
 import, a repeatedly-reconciled unchanged certificate must produce **zero**

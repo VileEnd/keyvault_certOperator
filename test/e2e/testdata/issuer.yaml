@@ -1,0 +1,43 @@
+# A self-signed root, a CA certificate issued from it, and a CA ClusterIssuer
+# backed by that certificate.
+#
+# This lets cert-manager genuinely issue wildcard certificates during the test
+# without ACME, public DNS or a DNS-01 solver. Production uses an ACME issuer
+# with a DNS-01 solver -- wildcards require it -- but what this suite needs to
+# prove is the chain *after* issuance: cert-manager writes a Secret, the
+# operator notices it and pushes it to Key Vault. A local CA exercises exactly
+# that, deterministically and offline.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: e2e-selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: e2e-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: keyvault-certoperator-e2e-ca
+  secretName: e2e-ca-tls
+  duration: 24h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: e2e-selfsigned
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: e2e-ca-issuer
+spec:
+  ca:
+    # A ClusterIssuer reads its secret from cert-manager's cluster resource
+    # namespace, which is where the CA certificate above is issued.
+    secretName: e2e-ca-tls

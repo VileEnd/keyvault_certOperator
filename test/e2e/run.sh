@@ -45,6 +45,8 @@ echo "==> Clearing anything left by a previous run"
 $KUBECTL delete wildcardcertificatepolicy --all --ignore-not-found --wait=false >/dev/null 2>&1 || true
 $KUBECTL delete namespace e2e-certs e2e-apps --ignore-not-found --wait=false >/dev/null 2>&1 || true
 
+$KUBECTL delete certificates.cert-manager.io --all -n e2e-certs --ignore-not-found --wait=false >/dev/null 2>&1 || true
+
 for kind in wildcardcertificatepolicies keyvaultcertificatesyncs; do
   while read -r ns name; do
     [[ -z "${name:-}" ]] && continue
@@ -62,6 +64,33 @@ for ns in e2e-certs e2e-apps; do
     sleep 2
   done
 done
+
+CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.21.1}"
+
+if [[ "${E2E_CERT_MANAGER:-0}" == "1" ]]; then
+  echo "==> Installing cert-manager ${CERT_MANAGER_VERSION}"
+  $KUBECTL apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml" >/dev/null
+
+  echo "==> Waiting for cert-manager to become available"
+  $KUBECTL wait --for=condition=Available --timeout=300s \
+    -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+
+  # The webhook validates every cert-manager resource, and it accepts traffic a
+  # little after the Deployment reports Available. Retry rather than racing it.
+  echo "==> Creating the CA issuer chain"
+  for attempt in $(seq 1 30); do
+    if $KUBECTL apply -f test/e2e/testdata/issuer.yaml >/dev/null 2>&1; then break; fi
+    if [[ "$attempt" == "30" ]]; then
+      echo "the cert-manager webhook never accepted the issuer manifests"
+      $KUBECTL apply -f test/e2e/testdata/issuer.yaml
+      exit 1
+    fi
+    sleep 5
+  done
+
+  echo "==> Waiting for the CA certificate to be issued"
+  $KUBECTL wait --for=condition=Ready --timeout=180s -n cert-manager certificate/e2e-ca
+fi
 
 echo "==> Installing CRDs"
 $KUBECTL apply -f config/crd/bases/ >/dev/null
@@ -113,4 +142,5 @@ echo "==> Running the end-to-end suite"
 E2E_KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" \
 E2E_OPERATOR_KUBECONFIG="$OPERATOR_KUBECONFIG" \
 E2E_OPERATOR_BIN="$WORKDIR/manager" \
-  go test -tags e2e -count=1 -v -timeout 15m ./test/e2e/
+E2E_CERT_MANAGER="${E2E_CERT_MANAGER:-0}" \
+  go test -tags e2e -count=1 -v -timeout 20m ./test/e2e/
