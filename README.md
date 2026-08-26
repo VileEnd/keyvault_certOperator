@@ -264,14 +264,62 @@ into `./bin` on demand.
 | `internal/infra/kube` | controller-runtime's fake client | nothing |
 | `internal/controller` | envtest: a real API server, both controllers, a fake vault | envtest binaries |
 
-Everything except the controller suite runs with no cluster and no Azure account.
-The controller suite skips cleanly if the envtest binaries are missing, so
-`go test ./...` is still useful on a bare checkout.
+| `test/e2e` | A real cluster, the real built binary, a real HTTPS Key Vault endpoint | a cluster (`make e2e`) |
+
+Everything except the controller and e2e suites runs with no cluster and no Azure
+account. The controller suite skips cleanly if the envtest binaries are missing,
+so `go test ./...` is still useful on a bare checkout.
+
+### End-to-end
+
+```bash
+make e2e          # against the current kubectl context (k3s, kind, AKS, ...)
+make e2e-cleanup
+```
+
+This runs the operator as a **separately built binary** against a real API
+server, holding nothing but a token for its own ServiceAccount bound to the
+ClusterRole this repo generates. That is the point: envtest reconcilers run with
+admin credentials, so a missing RBAC rule is invisible there and would surface
+only in production.
+
+The Azure side is a fake Key Vault that speaks the real REST protocol over real
+HTTPS. It answers an unauthenticated request with a `WWW-Authenticate` challenge
+exactly as Key Vault does — which matters, because the SDK deliberately strips
+the request body for that first probe so certificate material is never sent to an
+endpoint it has not yet authenticated against. Serving the Entra endpoints too
+means the workload identity credential genuinely runs. The fake also parses every
+upload as PKCS#12, so an archive Key Vault would reject fails the test here.
+
+It runs on `e2e-fake.vault.azure.net` mapped to loopback on port 443, because the
+SDK verifies the challenge resource against the vault host and that comparison
+includes any non-default port. Using a real vault hostname exercises that
+verification instead of switching it off. The script adds the `/etc/hosts`
+entries and needs root to bind 443.
+
+What this covers that envtest cannot: the generated ClusterRole is sufficient;
+the Azure request is well formed on the wire (TLS, challenge, token, base64, the
+certificate policy shape, tags, content type); `cmd/manager` actually wires up
+and runs, label-scoped cache included.
 
 The assertion that matters most is in the controller suite: after the first
 import, a repeatedly-reconciled unchanged certificate must produce **zero**
 further imports. Key Vault versions are permanent and each one is a candidate
 Application Gateway rotation, so a regression there degrades the vault quietly.
+
+## Uninstalling
+
+Delete the `WildcardCertificatePolicy` and `KeyVaultCertificateSync` resources
+**while the operator is still running**. They carry a finalizer that only the
+operator removes, so deleting them after it is gone leaves them — and any
+namespace containing them — stuck terminating. If that has already happened:
+
+```bash
+kubectl patch keyvaultcertificatesync <name> -n <ns> \
+  --type=merge -p '{"metadata":{"finalizers":null}}'
+```
+
+The finalizer never blocks on Azure, and nothing is ever deleted from Key Vault.
 
 ## Not in scope
 

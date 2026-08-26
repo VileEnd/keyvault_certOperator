@@ -161,3 +161,15 @@ check-helm-crds: helm-crds ## Fail if the chart's CRDs are stale.
 helm-lint: ## Lint and render the chart.
 	helm lint charts/keyvault-certoperator --set azure.clientId=00000000-0000-0000-0000-000000000000
 	helm template ci charts/keyvault-certoperator --set azure.clientId=00000000-0000-0000-0000-000000000000 > /dev/null
+
+##@ End-to-end
+
+.PHONY: e2e
+e2e: manifests generate ## Run the end-to-end suite against the current kubectl context.
+	test/e2e/run.sh
+
+.PHONY: e2e-cleanup
+e2e-cleanup: ## Remove what the end-to-end suite created.
+	-kubectl delete namespace keyvault-certoperator-e2e e2e-certs e2e-apps --ignore-not-found
+	-kubectl delete clusterrolebinding keyvault-certoperator-e2e --ignore-not-found
+	-kubectl delete wildcardcertificatepolicy e2e-discovery --ignore-not-found

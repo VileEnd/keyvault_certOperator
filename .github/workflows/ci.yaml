@@ -98,6 +98,41 @@ jobs:
             exit 1
           fi
 
+  e2e:
+    name: End-to-end (k3s)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Start k3s
+        run: |
+          curl -sfL https://get.k3s.io | sudo sh -s - \
+            --disable traefik --disable metrics-server --disable local-storage \
+            --write-kubeconfig-mode 644
+      - name: Wait for the node to be ready
+        run: |
+          for _ in $(seq 1 60); do
+            if kubectl get nodes 2>/dev/null | grep -q ' Ready '; then break; fi
+            sleep 5
+          done
+          kubectl get nodes
+        env:
+          KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      # Root is required: the fake Key Vault binds port 443 under a real
+      # *.vault.azure.net name so the SDK's challenge-resource verification is
+      # exercised rather than disabled.
+      - name: Run the end-to-end suite
+        run: |
+          sudo -E env "PATH=$PATH" KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
+            test/e2e/run.sh 2>&1 | tee e2e.log
+          if grep -q -- "--- SKIP" e2e.log; then
+            echo "the end-to-end suite skipped instead of running"
+            exit 1
+          fi
+
   image:
     name: Container image builds
     runs-on: ubuntu-latest
