@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Kept in step with the go directive in go.mod. The toolchain directive will
+  # fetch a newer one automatically if the module needs it.
+  GO_VERSION: "1.26"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.1
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      # Runs the unit suites and the envtest controller suite. setup-envtest
+      # fetches the API server binaries into ./bin.
+      - name: Test
+        run: make test
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: cover.out
+          if-no-files-found: warn
+
+  generated:
+    name: Generated files are current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      # Fails if the CRDs, RBAC or deepcopy code drift from the Go markers, or
+      # if the chart's copy of the CRDs is stale.
+      - name: Check manifests and deepcopy
+        run: make check-manifests
+      - name: Check the chart's CRDs
+        run: make check-helm-crds
+
+  chart:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+      - name: Lint
+        run: helm lint charts/keyvault-certoperator --set azure.clientId=00000000-0000-0000-0000-000000000000
+      - name: Render with defaults
+        run: helm template ci charts/keyvault-certoperator --set azure.clientId=00000000-0000-0000-0000-000000000000 > /dev/null
+      - name: Render with metrics and namespace scoping
+        run: |
+          helm template ci charts/keyvault-certoperator \
+            --set azure.clientId=00000000-0000-0000-0000-000000000000 \
+            --set metrics.enabled=true \
+            --set metrics.service.create=true \
+            --set metrics.serviceMonitor.enabled=true \
+            --set watchNamespaces="{cert-system}" > /dev/null
+      - name: Refuse to render without an identity
+        run: |
+          if helm template ci charts/keyvault-certoperator > /dev/null 2>&1; then
+            echo "the chart rendered without azure.clientId; the guard is broken"
+            exit 1
+          fi
+
+  image:
+    name: Container image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      # Build only. Publishing is deliberately not wired up here.
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

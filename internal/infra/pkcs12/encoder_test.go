@@ -3,11 +3,12 @@ package pkcs12_test
 import (
 	"testing"
 
+	gopkcs12 "software.sslmate.com/src/go-pkcs12"
+
 	"github.com/VileEnd/keyvault_certOperator/internal/app"
 	"github.com/VileEnd/keyvault_certOperator/internal/domain"
 	"github.com/VileEnd/keyvault_certOperator/internal/infra/pkcs12"
 	"github.com/VileEnd/keyvault_certOperator/internal/testutil"
-	gopkcs12 "software.sslmate.com/src/go-pkcs12"
 )
 
 func TestEncodeRoundTripsTheFullChain(t *testing.T) {

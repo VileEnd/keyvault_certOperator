@@ -7,9 +7,10 @@ import (
 	"encoding/hex"
 	"fmt"
 
+	pkcs12 "software.sslmate.com/src/go-pkcs12"
+
 	"github.com/VileEnd/keyvault_certOperator/internal/app"
 	"github.com/VileEnd/keyvault_certOperator/internal/domain"
-	pkcs12 "software.sslmate.com/src/go-pkcs12"
 )
 
 // Profile selects the PKCS#12 algorithm set.

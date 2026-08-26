@@ -111,12 +111,12 @@ func (r *KeyVaultCertificateSyncReconciler) sync(
 ) (app.SyncOutcome, error) {
 	vaultURL, err := azure.VaultURL(vaultTarget(sync.Spec.KeyVault), azure.Cloud(sync.Spec.KeyVault.Cloud))
 	if err != nil {
-		return app.SyncOutcome{}, fmt.Errorf("%w: %s", domain.ErrInvalidVaultName, err)
+		return app.SyncOutcome{}, fmt.Errorf("%w: %w", domain.ErrInvalidVaultName, err)
 	}
 
 	encoder, err := pkcs12.NewEncoder(pkcs12Profile(sync.Spec.SyncPolicy))
 	if err != nil {
-		return app.SyncOutcome{}, fmt.Errorf("%w: %s", domain.ErrInvalidVaultName, err)
+		return app.SyncOutcome{}, fmt.Errorf("%w: %w", domain.ErrInvalidVaultName, err)
 	}
 
 	syncer := &app.Syncer{Source: r.Source, Vault: r.Vault, Encode: encoder, Clock: r.Clock}

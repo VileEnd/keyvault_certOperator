@@ -1,0 +1,163 @@
+# Image URL to use for building and pushing.
+IMG ?= ghcr.io/vileend/keyvault-certoperator:latest
+# Platforms for the multi-arch build.
+PLATFORMS ?= linux/amd64,linux/arm64
+
+# Tool versions, pinned so CI and a developer machine agree.
+CONTROLLER_TOOLS_VERSION ?= v0.21.0
+ENVTEST_VERSION ?= v0.24.1
+ENVTEST_K8S_VERSION ?= 1.36
+GOLANGCI_LINT_VERSION ?= v2.13.1
+
+LOCALBIN ?= $(shell pwd)/bin
+CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
+ENVTEST ?= $(LOCALBIN)/setup-envtest
+GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
+
+SHELL = /usr/bin/env bash -o pipefail
+.SHELLFLAGS = -ec
+
+.PHONY: all
+all: build
+
+##@ General
+
+.PHONY: help
+help: ## Display this help.
+	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} \
+	/^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2 } \
+	/^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) }' $(MAKEFILE_LIST)
+
+##@ Development
+
+.PHONY: manifests
+manifests: controller-gen ## Generate CRDs and RBAC from code markers.
+	$(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=config/crd/bases
+	$(CONTROLLER_GEN) rbac:roleName=manager-role paths=./internal/controller/... output:rbac:artifacts:config=config/rbac
+
+.PHONY: generate
+generate: controller-gen ## Generate DeepCopy implementations.
+	$(CONTROLLER_GEN) object:headerFile=hack/boilerplate.go.txt paths=./api/...
+
+.PHONY: fmt
+fmt: ## Run go fmt.
+	go fmt ./...
+
+.PHONY: vet
+vet: ## Run go vet.
+	go vet ./...
+
+.PHONY: lint
+lint: golangci-lint ## Run golangci-lint.
+	$(GOLANGCI_LINT) run
+
+.PHONY: lint-fix
+lint-fix: golangci-lint ## Run golangci-lint with --fix.
+	$(GOLANGCI_LINT) run --fix
+
+.PHONY: test
+test: manifests generate fmt vet setup-envtest ## Run all tests, including envtest.
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
+		go test $$(go list ./... | grep -v /test/e2e) -coverprofile cover.out
+
+.PHONY: test-unit
+test-unit: ## Run only the tests that need neither a cluster nor Azure.
+	go test ./internal/domain/... ./internal/app/... ./internal/infra/...
+
+.PHONY: check-manifests
+check-manifests: manifests generate ## Fail if generated files are out of date.
+	@if [ -n "$$(git status --porcelain config/ api/)" ]; then \
+		echo "generated files are out of date; run 'make manifests generate' and commit the result"; \
+		git --no-pager diff -- config/ api/; \
+		exit 1; \
+	fi
+
+.PHONY: refresh-testdata
+refresh-testdata: ## Re-vendor the cert-manager CRD used by envtest.
+	@cmdir=$$(go list -m -f '{{.Dir}}' github.com/cert-manager/cert-manager) && \
+		cp "$$cmdir/deploy/crds/cert-manager.io_certificates.yaml" test/testdata/crds/ && \
+		chmod 644 test/testdata/crds/cert-manager.io_certificates.yaml
+
+##@ Build
+
+.PHONY: build
+build: manifests generate fmt vet ## Build the manager binary.
+	go build -o bin/manager ./cmd/manager
+
+.PHONY: run
+run: manifests generate fmt vet ## Run the manager against the current kubecontext.
+	go run ./cmd/manager --azure-credential=default
+
+.PHONY: docker-build
+docker-build: ## Build the container image.
+	docker build -t $(IMG) .
+
+.PHONY: docker-buildx
+docker-buildx: ## Build and push a multi-arch image.
+	docker buildx build --push --platform=$(PLATFORMS) --tag $(IMG) -f Dockerfile .
+
+.PHONY: build-installer
+build-installer: manifests generate kustomize ## Render a single-file install manifest.
+	mkdir -p dist
+	cd config/manager && $(LOCALBIN)/kustomize edit set image controller=$(IMG)
+	$(LOCALBIN)/kustomize build config/default > dist/install.yaml
+
+##@ Deployment
+
+.PHONY: install
+install: manifests kustomize ## Install the CRDs.
+	$(LOCALBIN)/kustomize build config/crd | kubectl apply -f -
+
+.PHONY: uninstall
+uninstall: manifests kustomize ## Uninstall the CRDs.
+	$(LOCALBIN)/kustomize build config/crd | kubectl delete --ignore-not-found -f -
+
+.PHONY: deploy
+deploy: manifests kustomize ## Deploy the operator.
+	cd config/manager && $(LOCALBIN)/kustomize edit set image controller=$(IMG)
+	$(LOCALBIN)/kustomize build config/default | kubectl apply -f -
+
+.PHONY: undeploy
+undeploy: kustomize ## Remove the operator.
+	$(LOCALBIN)/kustomize build config/default | kubectl delete --ignore-not-found -f -
+
+##@ Tooling
+
+$(LOCALBIN):
+	mkdir -p $(LOCALBIN)
+
+.PHONY: controller-gen
+controller-gen: $(LOCALBIN)
+	@test -x $(CONTROLLER_GEN) || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)
+
+.PHONY: setup-envtest
+setup-envtest: $(LOCALBIN)
+	@test -x $(ENVTEST) || GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION)
+	@$(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path >/dev/null
+
+.PHONY: golangci-lint
+golangci-lint: $(LOCALBIN)
+	@test -x $(GOLANGCI_LINT) || GOBIN=$(LOCALBIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
+.PHONY: kustomize
+kustomize: $(LOCALBIN)
+	@test -x $(LOCALBIN)/kustomize || GOBIN=$(LOCALBIN) go install sigs.k8s.io/kustomize/kustomize/v5@latest
+
+##@ Helm
+
+.PHONY: helm-crds
+helm-crds: manifests ## Sync the generated CRDs into the chart.
+	cp config/crd/bases/*.yaml charts/keyvault-certoperator/crds/
+
+.PHONY: check-helm-crds
+check-helm-crds: helm-crds ## Fail if the chart's CRDs are stale.
+	@if [ -n "$$(git status --porcelain charts/)" ]; then \
+		echo "the chart's CRDs are out of date; run 'make helm-crds' and commit the result"; \
+		git --no-pager diff -- charts/; \
+		exit 1; \
+	fi
+
+.PHONY: helm-lint
+helm-lint: ## Lint and render the chart.
+	helm lint charts/keyvault-certoperator --set azure.clientId=00000000-0000-0000-0000-000000000000
+	helm template ci charts/keyvault-certoperator --set azure.clientId=00000000-0000-0000-0000-000000000000 > /dev/null

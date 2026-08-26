@@ -286,7 +286,7 @@ func checkIssuable(zone string) error {
 		return fmt.Errorf("%w: %q is a public suffix; refusing to issue wildcards for it", ErrInvalidZone, zone)
 	}
 	if _, err := publicsuffix.EffectiveTLDPlusOne(zone); err != nil {
-		return fmt.Errorf("%w: %q is not a registrable domain: %v", ErrInvalidZone, zone, err)
+		return fmt.Errorf("%w: %q is not a registrable domain: %w", ErrInvalidZone, zone, err)
 	}
 	return nil
 }

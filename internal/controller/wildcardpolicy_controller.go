@@ -159,13 +159,13 @@ func (r *WildcardCertificatePolicyReconciler) plan(
 ) (app.DesiredState, error) {
 	vaultURL, err := azure.VaultURL(vaultTarget(policy.Spec.KeyVault), azure.Cloud(policy.Spec.KeyVault.Cloud))
 	if err != nil {
-		return app.DesiredState{}, fmt.Errorf("%w: %s", domain.ErrInvalidVaultName, err)
+		return app.DesiredState{}, fmt.Errorf("%w: %w", domain.ErrInvalidVaultName, err)
 	}
 
 	discovery := policy.Spec.Discovery
 	selector, err := kube.SelectorFrom(namespaceSelector(discovery))
 	if err != nil {
-		return app.DesiredState{}, fmt.Errorf("%w: %s", domain.ErrInvalidZone, err)
+		return app.DesiredState{}, fmt.Errorf("%w: %w", domain.ErrInvalidZone, err)
 	}
 
 	hosts := &kube.HostSource{

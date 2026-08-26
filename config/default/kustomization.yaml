@@ -1,0 +1,7 @@
+namespace: keyvault-certoperator-system
+namePrefix: keyvault-certoperator-
+
+resources:
+- ../crd
+- ../rbac
+- ../manager

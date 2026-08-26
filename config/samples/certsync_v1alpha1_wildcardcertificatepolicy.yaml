@@ -1,0 +1,42 @@
+# Discovers the hostnames the cluster routes, has cert-manager issue the
+# wildcards that cover them, and keeps those synced into Azure Key Vault.
+apiVersion: certsync.vileend.io/v1alpha1
+kind: WildcardCertificatePolicy
+metadata:
+  name: public-sites
+spec:
+  # REQUIRED. Nothing outside these zones is ever issued. This is the boundary
+  # that stops anyone who can create an Ingress from spending your Let's Encrypt
+  # rate limit. Zones at or above a public suffix ("com", "co.uk") are rejected.
+  zones:
+  - x.com
+  - sub.x.com
+
+  # A ceiling on how many certificates may be planned. The overflow is reported
+  # in status rather than issued.
+  maxCertificates: 10
+
+  discovery:
+    ingress: true
+    # Only watched when the Gateway API CRDs are installed at operator start.
+    httpRoutes: true
+
+  # PerZone issues one SAN certificate per zone, keeping the Application Gateway
+  # listener, site and certificate counts low -- all three share a hard,
+  # non-adjustable ceiling of 100.
+  grouping: PerZone
+
+  # The issuer is referenced, never created. It must be configured with a DNS-01
+  # solver: wildcards cannot use HTTP-01.
+  issuerRef:
+    name: letsencrypt-dns
+    kind: ClusterIssuer
+
+  certificateNamespace: cert-system
+
+  keyVault:
+    name: my-vault
+
+  # Retain leaves no-longer-required certificates in place. An Application
+  # Gateway listener may still be serving one whose last Ingress just vanished.
+  orphanPolicy: Retain
