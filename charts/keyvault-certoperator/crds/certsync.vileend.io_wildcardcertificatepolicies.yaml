@@ -76,6 +76,22 @@ spec:
               discovery:
                 description: Discovery selects the sources of hostnames.
                 properties:
+                  gateways:
+                    default: true
+                    description: |-
+                      Gateways enables discovery from the hostnames declared on Gateway API
+                      Gateway listeners.
+
+                      This is not redundant with HTTPRoutes. A route whose spec.hostnames is
+                      empty inherits the hostnames its listener allows, so with a wildcard
+                      listener -- the common shape behind Envoy Gateway -- the hostname exists
+                      only on the Gateway and reading routes alone would discover nothing.
+
+                      Listener protocol is deliberately ignored. A listener may terminate plain
+                      HTTP because TLS is already terminated upstream at Application Gateway,
+                      which is exactly the topology this operator serves; the hostname is still
+                      a hostname the cluster routes.
+                    type: boolean
                   httpRoutes:
                     default: true
                     description: |-

@@ -140,6 +140,7 @@ jobs:
       # *.vault.azure.net name, so the SDK's challenge-resource verification is
       # exercised rather than switched off. It also writes /etc/hosts.
       - name: Run the end-to-end suite
+        shell: bash
         run: |
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GOPATH=$(go env GOPATH)" \
             "GOMODCACHE=$(go env GOMODCACHE)" "GOCACHE=$(go env GOCACHE)" \
@@ -153,6 +154,7 @@ jobs:
         run: |
           grep -q -- "--- PASS: TestOperatorSyncsACertificateIntoKeyVault" e2e.log
           grep -q -- "--- PASS: TestOperatorDiscoversHostsAndRequestsCertificates" e2e.log
+          grep -q -- "--- PASS: TestOperatorDiscoversHostsFromGatewayListeners" e2e.log
       - name: Dump diagnostics on failure
         if: failure()
         env:
@@ -192,6 +194,7 @@ jobs:
       # imports the result into the mock Key Vault. Nothing hand-writes the
       # Secret here -- cert-manager does.
       - name: Run the end-to-end suite with cert-manager
+        shell: bash
         run: |
           sudo -E env "PATH=$PATH" "HOME=$HOME" "GOPATH=$(go env GOPATH)" \
             "GOMODCACHE=$(go env GOMODCACHE)" "GOCACHE=$(go env GOCACHE)" \

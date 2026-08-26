@@ -39,6 +39,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/VileEnd/keyvault_certOperator/api/v1alpha1"
 	"github.com/VileEnd/keyvault_certOperator/internal/app"
@@ -68,6 +69,7 @@ func setup(t *testing.T) *harness {
 	mustSucceed(t, clientgoscheme.AddToScheme(scheme))
 	mustSucceed(t, v1alpha1.AddToScheme(scheme))
 	mustSucceed(t, cmapi.AddToScheme(scheme))
+	mustSucceed(t, gatewayv1.Install(scheme))
 
 	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
@@ -359,6 +361,105 @@ func TestOperatorDiscoversHostsAndRequestsCertificates(t *testing.T) {
 			return h.Host == "nope.elsewhere.com"
 		}) {
 			return fmt.Errorf("skippedHosts = %+v, want the out-of-zone host reported", got.Status.SkippedHosts)
+		}
+		return nil
+	})
+}
+
+// The Envoy Gateway shape: one wildcard listener fronting routes that state no
+// hostnames of their own. A route with an empty spec.hostnames inherits
+// everything its listener allows, so the hostname exists only on the Gateway --
+// read HTTPRoutes alone and this cluster looks like it routes nothing.
+//
+// Run against a real API server because that is where it can actually break:
+// the Gateway watch is established only if the CRD is served at startup, and
+// listing Gateways needs an RBAC rule the operator's ServiceAccount really has
+// to hold.
+func TestOperatorDiscoversHostsFromGatewayListeners(t *testing.T) {
+	h := setup(t)
+	ctx := t.Context()
+
+	wildcard := gatewayv1.Hostname("*.gwzone.com")
+	apex := gatewayv1.Hostname("gwzone.com")
+	outside := gatewayv1.Hostname("*.elsewhere.com")
+	h.mustCreate(t, &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "eg", Namespace: appNamespace},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "envoy-gateway",
+			Listeners: []gatewayv1.Listener{
+				// Plain HTTP on purpose: Application Gateway terminates TLS
+				// upstream, so the in-cluster listener has no certificate of its
+				// own. The hostname is still a hostname the cluster routes.
+				{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType, Hostname: &wildcard},
+				{Name: "apex", Port: 8080, Protocol: gatewayv1.HTTPProtocolType, Hostname: &apex},
+				{Name: "other", Port: 8081, Protocol: gatewayv1.HTTPProtocolType, Hostname: &outside},
+				// No hostname: matches everything, so there is nothing concrete
+				// to derive a certificate from and it must contribute nothing.
+				{Name: "catchall", Port: 8082, Protocol: gatewayv1.HTTPProtocolType},
+			},
+		},
+	})
+
+	// Deliberately no hostnames: this route serves whatever the listener allows.
+	h.mustCreate(t, &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "inherits", Namespace: appNamespace},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{Name: "eg"}},
+			},
+		},
+	})
+
+	policy := &v1alpha1.WildcardCertificatePolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "e2e-gateway"},
+		Spec: v1alpha1.WildcardCertificatePolicySpec{
+			Zones:                []string{"gwzone.com"},
+			MaxCertificates:      5,
+			Grouping:             v1alpha1.GroupingPerZone,
+			IssuerRef:            v1alpha1.IssuerReference{Name: "letsencrypt-dns", Kind: "ClusterIssuer", Group: "cert-manager.io"},
+			CertificateNamespace: certNamespace,
+			KeyVault:             v1alpha1.KeyVaultSpec{VaultURL: h.vault.URL()},
+		},
+	}
+	h.mustCreate(t, policy)
+	t.Cleanup(func() { _ = h.client.Delete(context.Background(), policy) })
+
+	eventually(t, 90*time.Second, func() error {
+		var cert cmapi.Certificate
+		key := client.ObjectKey{Namespace: certNamespace, Name: "wildcard-gwzone-com"}
+		if err := h.client.Get(ctx, key, &cert); err != nil {
+			return err
+		}
+		want := []string{"*.gwzone.com", "gwzone.com"}
+		got := slices.Clone(cert.Spec.DNSNames)
+		slices.Sort(got)
+		if !slices.Equal(got, want) {
+			return fmt.Errorf("dnsNames = %v, want %v", got, want)
+		}
+		return nil
+	})
+
+	eventually(t, 60*time.Second, func() error {
+		var got v1alpha1.WildcardCertificatePolicy
+		if err := h.client.Get(ctx, client.ObjectKeyFromObject(policy), &got); err != nil {
+			return err
+		}
+		// The out-of-zone listener is reported, not silently dropped, and the
+		// hostname-less listener contributes nothing at all.
+		if !slices.ContainsFunc(got.Status.SkippedHosts, func(s v1alpha1.SkippedHost) bool {
+			return s.Host == "*.elsewhere.com"
+		}) {
+			return fmt.Errorf("skippedHosts = %+v, want the out-of-zone listener reported", got.Status.SkippedHosts)
+		}
+		for _, skipped := range got.Status.SkippedHosts {
+			if skipped.Host == "" {
+				return fmt.Errorf("the hostname-less listener produced an empty host: %+v", got.Status.SkippedHosts)
+			}
+		}
+		// Exactly one certificate: the catch-all listener contributed nothing,
+		// so it cannot have planted a nameless certificate alongside the zone.
+		if len(got.Status.RequiredCertificates) != 1 {
+			return fmt.Errorf("requiredCertificates = %+v, want exactly one", got.Status.RequiredCertificates)
 		}
 		return nil
 	})

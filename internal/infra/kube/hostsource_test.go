@@ -1,6 +1,7 @@
 package kube_test
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -51,6 +52,29 @@ func httpRouteWith(namespace, name string, hostnames ...string) *gatewayv1.HTTPR
 	return &gatewayv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec:       gatewayv1.HTTPRouteSpec{Hostnames: hosts},
+	}
+}
+
+// gatewayWith builds a Gateway whose listeners carry the given hostnames. An
+// empty string means a listener with no hostname at all, which matches every
+// name the gateway receives.
+func gatewayWith(namespace, name string, hostnames ...string) *gatewayv1.Gateway {
+	listeners := make([]gatewayv1.Listener, 0, len(hostnames))
+	for i, host := range hostnames {
+		listener := gatewayv1.Listener{
+			Name:     gatewayv1.SectionName(fmt.Sprintf("l%d", i)),
+			Port:     gatewayv1.PortNumber(80 + i),
+			Protocol: gatewayv1.HTTPProtocolType,
+		}
+		if host != "" {
+			hostname := gatewayv1.Hostname(host)
+			listener.Hostname = &hostname
+		}
+		listeners = append(listeners, listener)
+	}
+	return &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec:       gatewayv1.GatewaySpec{GatewayClassName: "envoy", Listeners: listeners},
 	}
 }
 
@@ -105,25 +129,34 @@ func TestHostSourceRespectsTheDiscoveryToggles(t *testing.T) {
 	objects := []client.Object{
 		ingressWith("apps", "legacy", []string{"old.x.com"}, nil),
 		httpRouteWith("apps", "modern", "new.x.com"),
+		gatewayWith("envoy-gateway-system", "eg", "*.x.com"),
 	}
 
 	tests := []struct {
-		name    string
-		ingress bool
-		routes  bool
-		want    []string
+		name     string
+		ingress  bool
+		routes   bool
+		gateways bool
+		want     []string
 	}{
-		{"both", true, true, []string{"new.x.com", "old.x.com"}},
-		{"ingress only", true, false, []string{"old.x.com"}},
-		{"httproutes only", false, true, []string{"new.x.com"}},
-		{"neither", false, false, nil},
+		{"all", true, true, true, []string{"*.x.com", "new.x.com", "old.x.com"}},
+		{"ingress only", true, false, false, []string{"old.x.com"}},
+		{"httproutes only", false, true, false, []string{"new.x.com"}},
+		{"gateways only", false, false, true, []string{"*.x.com"}},
+		{"gateway api only", false, true, true, []string{"*.x.com", "new.x.com"}},
+		{"none", false, false, false, nil},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			c := fake.NewClientBuilder().WithScheme(routingScheme(t)).WithObjects(objects...).Build()
-			source := &kube.HostSource{Reader: c, IncludeIngress: tc.ingress, IncludeHTTPRoutes: tc.routes}
+			source := &kube.HostSource{
+				Reader:            c,
+				IncludeIngress:    tc.ingress,
+				IncludeHTTPRoutes: tc.routes,
+				IncludeGateways:   tc.gateways,
+			}
 
 			got, err := source.Hosts(t.Context())
 			if err != nil {
@@ -158,7 +191,11 @@ func TestHostSourceHonoursTheNamespaceSelector(t *testing.T) {
 	}
 
 	source := &kube.HostSource{
-		Reader: c, IncludeIngress: true, IncludeHTTPRoutes: true, NamespaceSelector: selector,
+		Reader:            c,
+		IncludeIngress:    true,
+		IncludeHTTPRoutes: true,
+		IncludeGateways:   true,
+		NamespaceSelector: selector,
 	}
 	got, err := source.Hosts(t.Context())
 	if err != nil {
@@ -187,6 +224,75 @@ func TestHostSourceIgnoresEmptyHosts(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, []string{"real.x.com"}) {
 		t.Errorf("hosts = %v, want [real.x.com]", got)
+	}
+}
+
+// The case that motivated reading Gateways at all: a route that states no
+// hostnames of its own inherits everything its listener allows. Reading routes
+// alone discovers nothing here, which behind a single wildcard listener -- the
+// usual Envoy Gateway shape -- means discovering nothing at all.
+func TestHostSourceCollectsListenerHostnamesForRoutesThatInheritThem(t *testing.T) {
+	t.Parallel()
+	objects := []client.Object{
+		gatewayWith("envoy-gateway-system", "eg", "*.x.com"),
+		// No hostnames: this route serves whatever the listener allows.
+		httpRouteWith("apps", "inherits"),
+	}
+	c := fake.NewClientBuilder().WithScheme(routingScheme(t)).WithObjects(objects...).Build()
+
+	routesOnly := &kube.HostSource{Reader: c, IncludeHTTPRoutes: true}
+	got, err := routesOnly.Hosts(t.Context())
+	if err != nil {
+		t.Fatalf("Hosts: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("routes alone found %v; the hostname lives on the listener, so this should be empty", got)
+	}
+
+	withGateways := &kube.HostSource{Reader: c, IncludeHTTPRoutes: true, IncludeGateways: true}
+	got, err = withGateways.Hosts(t.Context())
+	if err != nil {
+		t.Fatalf("Hosts: %v", err)
+	}
+	if want := []string{"*.x.com"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("hosts = %v, want %v", got, want)
+	}
+}
+
+func TestHostSourceMergesListenerAndRouteHostnames(t *testing.T) {
+	t.Parallel()
+	objects := []client.Object{
+		gatewayWith("envoy-gateway-system", "eg", "*.x.com", "*.sub.x.com"),
+		httpRouteWith("apps", "narrowed", "a.x.com"),
+	}
+	c := fake.NewClientBuilder().WithScheme(routingScheme(t)).WithObjects(objects...).Build()
+	source := &kube.HostSource{Reader: c, IncludeHTTPRoutes: true, IncludeGateways: true}
+
+	got, err := source.Hosts(t.Context())
+	if err != nil {
+		t.Fatalf("Hosts: %v", err)
+	}
+	want := []string{"*.sub.x.com", "*.x.com", "a.x.com"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("hosts = %v, want %v", got, want)
+	}
+}
+
+// A listener with no hostname matches every name the gateway receives. There is
+// nothing concrete to derive a certificate from, so it must contribute nothing
+// rather than an invented name.
+func TestHostSourceIgnoresListenersWithoutAHostname(t *testing.T) {
+	t.Parallel()
+	c := fake.NewClientBuilder().WithScheme(routingScheme(t)).
+		WithObjects(gatewayWith("envoy-gateway-system", "eg", "", "*.x.com")).Build()
+	source := &kube.HostSource{Reader: c, IncludeGateways: true}
+
+	got, err := source.Hosts(t.Context())
+	if err != nil {
+		t.Fatalf("Hosts: %v", err)
+	}
+	if want := []string{"*.x.com"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("hosts = %v, want %v", got, want)
 	}
 }
 

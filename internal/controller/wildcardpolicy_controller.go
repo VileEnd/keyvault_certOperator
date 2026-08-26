@@ -49,6 +49,8 @@ type WildcardCertificatePolicyReconciler struct {
 	// startup. The watch cannot be established for an unknown type, so enabling
 	// Gateway API afterwards needs an operator restart.
 	HTTPRoutesAvailable bool
+	// GatewaysAvailable records the same for the Gateway kind.
+	GatewaysAvailable bool
 }
 
 // +kubebuilder:rbac:groups=certsync.vileend.io,resources=wildcardcertificatepolicies,verbs=get;list;watch;create;update;patch;delete
@@ -56,6 +58,7 @@ type WildcardCertificatePolicyReconciler struct {
 // +kubebuilder:rbac:groups=certsync.vileend.io,resources=wildcardcertificatepolicies/finalizers,verbs=update
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get;list;watch;create;update;patch;delete
 
@@ -172,6 +175,7 @@ func (r *WildcardCertificatePolicyReconciler) plan(
 		Reader:            r.Client,
 		IncludeIngress:    enabled(discovery, func(d *v1alpha1.DiscoverySpec) *bool { return d.Ingress }),
 		IncludeHTTPRoutes: r.HTTPRoutesAvailable && enabled(discovery, func(d *v1alpha1.DiscoverySpec) *bool { return d.HTTPRoutes }),
+		IncludeGateways:   r.GatewaysAvailable && enabled(discovery, func(d *v1alpha1.DiscoverySpec) *bool { return d.Gateways }),
 		NamespaceSelector: selector,
 	}
 

@@ -1,0 +1,50 @@
+# The Gateway API variant: routing is entirely through Gateway API (Envoy
+# Gateway, Istio), with no Ingress resources in play.
+#
+# Application Gateway terminates TLS out front using the wildcard certificates
+# this policy keeps in Key Vault. The in-cluster gateway behind it is plain HTTP,
+# which is why listener protocol is not considered during discovery.
+apiVersion: certsync.vileend.io/v1alpha1
+kind: WildcardCertificatePolicy
+metadata:
+  name: public-sites
+spec:
+  # REQUIRED. Nothing outside these zones is ever issued. Zones at or above a
+  # public suffix ("com", "co.uk") are rejected outright.
+  zones:
+  - x.com
+  - sub.x.com
+
+  maxCertificates: 10
+
+  discovery:
+    # No Ingress resources here, so skip listing a type that is always empty.
+    ingress: false
+    # Narrows what a listener already allows.
+    httpRoutes: true
+    # The one that usually carries the hostname. A route with an empty
+    # spec.hostnames inherits its listener's, so behind a single wildcard
+    # listener this is the only source that sees anything at all.
+    gateways: true
+
+  # PerZone issues one SAN certificate covering the wildcard and the apex --
+  # "*.x.com" does not match "x.com", so the apex needs its own SAN. Both fit on
+  # one Application Gateway listener, which accepts up to 5 hostnames.
+  grouping: PerZone
+
+  # Referenced, never created. Must use a DNS-01 solver: wildcards cannot use
+  # HTTP-01, so no challenge is ever served from the cluster.
+  issuerRef:
+    name: letsencrypt-dns
+    kind: ClusterIssuer
+
+  certificateNamespace: cert-system
+
+  keyVault:
+    name: my-vault
+
+  # Retain, not Prune. Under Prune a discovery pass that returns zero hosts --
+  # a restart before the Gateway API CRDs are registered is enough -- deletes
+  # every generated Certificate, destroying the issued Secret and forcing
+  # re-issuance against Let's Encrypt's duplicate-certificate limit.
+  orphanPolicy: Retain

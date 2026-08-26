@@ -46,7 +46,7 @@ Two things worth knowing before you commit:
 ## How it works
 
 ```
-Ingress / HTTPRoute hostnames
+Ingress rules/TLS · Gateway listeners · HTTPRoute hostnames
         │  discovery (zone allowlist + public-suffix guard)
         ▼
 WildcardCertificatePolicy ──creates──► cert-manager Certificate ──► TLS Secret
@@ -147,11 +147,53 @@ for a commented example.
 | `maxCertificates` | `10` | Overflow is reported in status, not issued. |
 | `discovery.ingress` | `true` | Discover from `networking.k8s.io` Ingresses. |
 | `discovery.httpRoutes` | `true` | Only watched if Gateway API CRDs exist at operator start. |
+| `discovery.gateways` | `true` | Gateway listener hostnames. Same startup constraint. See below. |
 | `discovery.namespaceSelector` | all | Narrow discovery by namespace labels. |
 | `grouping` | `PerZone` | One SAN certificate per zone, or `PerWildcard`. |
 | `issuerRef` | — | Referenced, never created. Must use a DNS-01 solver. |
 | `certificateNamespace` | — | Where Certificates, Secrets and syncs are created. |
 | `orphanPolicy` | `Retain` | `Prune` also deletes no-longer-required resources. |
+
+#### Gateway API (Envoy Gateway, Istio)
+
+Set `discovery.ingress: false` if you route entirely through Gateway API, and
+leave both Gateway API sources on:
+
+```yaml
+spec:
+  discovery:
+    ingress: false
+    httpRoutes: true
+    gateways: true
+```
+
+**Both Gateway API sources are needed, and `gateways` is the one that usually
+matters.** An HTTPRoute states `spec.hostnames` only to *narrow* what its
+listener already allows; leaving it empty inherits the listener's hostnames.
+So in the common arrangement — one wildcard listener fronting many routes —
+the hostname exists only on the `Gateway`, and reading HTTPRoutes alone
+discovers nothing at all.
+
+Listener protocol is ignored on purpose. Behind Application Gateway the
+in-cluster listener is often plain HTTP, because TLS was already terminated
+upstream; that is exactly the topology this operator serves, and the hostname is
+still a hostname the cluster routes.
+
+A listener with **no** hostname matches everything the gateway receives. There
+is no concrete name to derive a certificate from, so it contributes nothing
+rather than a guess.
+
+Two operational notes:
+
+- Gateway API CRDs must be installed **before the operator starts** —
+  controller-runtime cannot open an informer for a type the API server does not
+  serve. Installing Gateway API afterwards needs a restart. The startup log says
+  which sources are active.
+- Keep `orphanPolicy` at its default `Retain`. Under `Prune`, a discovery pass
+  that legitimately returns zero hosts deletes every generated `Certificate` —
+  which destroys the issued Secret and forces re-issuance against Let's
+  Encrypt's duplicate-certificate limit. A restart with Gateway API CRDs not yet
+  registered is enough to produce that pass.
 
 ### `KeyVaultCertificateSync` (namespaced)
 

@@ -14,7 +14,7 @@ import (
 )
 
 // HostSource implements app.HostSource by enumerating the hostnames the cluster
-// routes, from Ingress and Gateway API HTTPRoute resources.
+// routes, from Ingress, Gateway API Gateway listeners and HTTPRoutes.
 type HostSource struct {
 	Reader client.Reader
 
@@ -24,6 +24,9 @@ type HostSource struct {
 	// only when the Gateway API CRDs were present at startup, because
 	// controller-runtime cannot start an informer for an unknown type.
 	IncludeHTTPRoutes bool
+	// IncludeGateways enables discovery from Gateway listener hostnames, under
+	// the same startup constraint as IncludeHTTPRoutes.
+	IncludeGateways bool
 	// NamespaceSelector narrows discovery. Nil means every namespace.
 	NamespaceSelector labels.Selector
 }
@@ -33,6 +36,16 @@ type HostSource struct {
 // Both Ingress rule hosts and the hosts named in its TLS blocks are collected:
 // a rule host is what actually gets routed, while a TLS host records an intent
 // to terminate TLS for it, and either is a reason to want a certificate.
+//
+// Gateway API contributes from two places, and needs both. An HTTPRoute states
+// its own hostnames only when it wants to narrow what its listener already
+// allows; leaving spec.hostnames empty inherits the listener's, which is the
+// usual shape when a single wildcard listener fronts many routes. Reading
+// routes alone would therefore find nothing at all in that arrangement, so the
+// listener hostnames are collected directly. Doing it this way also means a
+// listener declared before any route is attached is still discovered, and it
+// avoids resolving parentRefs -- an inherited hostname is by definition one the
+// listener already contributed.
 func (h *HostSource) Hosts(ctx context.Context) ([]string, error) {
 	allowed, err := h.allowedNamespaces(ctx)
 	if err != nil {
@@ -74,6 +87,28 @@ func (h *HostSource) Hosts(ctx context.Context) ([]string, error) {
 			}
 			for _, hostname := range route.Spec.Hostnames {
 				add(seen, string(hostname))
+			}
+		}
+	}
+
+	if h.IncludeGateways {
+		var list gatewayv1.GatewayList
+		if err := h.Reader.List(ctx, &list); err != nil {
+			return nil, fmt.Errorf("listing gateways: %w", err)
+		}
+		for i := range list.Items {
+			gateway := &list.Items[i]
+			if !inNamespace(allowed, gateway.Namespace) {
+				continue
+			}
+			for _, listener := range gateway.Spec.Listeners {
+				// A listener with no hostname matches everything the gateway
+				// receives. There is no concrete name to derive a certificate
+				// from, so it contributes nothing rather than a guess.
+				if listener.Hostname == nil {
+					continue
+				}
+				add(seen, string(*listener.Hostname))
 			}
 		}
 	}

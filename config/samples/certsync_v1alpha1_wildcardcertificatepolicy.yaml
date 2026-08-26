@@ -18,8 +18,15 @@ spec:
 
   discovery:
     ingress: true
-    # Only watched when the Gateway API CRDs are installed at operator start.
+    # Both Gateway API sources are only watched when the Gateway API CRDs are
+    # installed at operator start; adding them later needs a restart.
+    #
+    # gateways is not redundant with httpRoutes. A route that leaves
+    # spec.hostnames empty inherits whatever its listener allows, so with one
+    # wildcard listener fronting many routes -- the usual Envoy Gateway shape --
+    # the hostname exists only on the Gateway.
     httpRoutes: true
+    gateways: true
 
   # PerZone issues one SAN certificate per zone, keeping the Application Gateway
   # listener, site and certificate counts low -- all three share a hard,
