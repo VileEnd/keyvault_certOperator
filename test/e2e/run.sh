@@ -88,7 +88,8 @@ if [[ "${E2E_CERT_MANAGER:-0}" == "1" ]]; then
     sleep 5
   done
 
-  echo "==> Waiting for the CA certificate to be issued"
+  echo "==> Waiting for the root and intermediate certificates to be issued"
+  $KUBECTL wait --for=condition=Ready --timeout=180s -n cert-manager certificate/e2e-root
   $KUBECTL wait --for=condition=Ready --timeout=180s -n cert-manager certificate/e2e-ca
 fi
 

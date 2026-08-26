@@ -178,10 +178,19 @@ func TestCertManagerIssuesAndTheOperatorSyncsItToKeyVault(t *testing.T) {
 	if !slices.Contains(got.Leaf.DNSNames, zone) {
 		t.Errorf("uploaded leaf SANs = %v, want the apex %q", got.Leaf.DNSNames, zone)
 	}
-	// The CA that cert-manager issued from must travel with the leaf:
-	// Application Gateway needs the chain, not just the end-entity certificate.
+	// The intermediate that signed the leaf must travel with it. Application
+	// Gateway names an incomplete chain as a leading cause of certificate
+	// failures, so a leaf-only upload would be a real defect.
 	if len(got.Chain) == 0 {
-		t.Error("uploaded archive has no issuing chain")
+		t.Fatal("uploaded archive has no issuing chain; Application Gateway requires the intermediates")
+	}
+	if !got.Chain[0].IsCA {
+		t.Errorf("first chain entry %q is not a CA certificate", got.Chain[0].Subject.CommonName)
+	}
+	// The leaf has to come first and the chain must actually chain to it.
+	if got.Leaf.Issuer.CommonName != got.Chain[0].Subject.CommonName {
+		t.Errorf("leaf issuer %q does not match the first chain entry %q",
+			got.Leaf.Issuer.CommonName, got.Chain[0].Subject.CommonName)
 	}
 	if got.Tags[app.TagChainDigest] == "" {
 		t.Error("the chain digest tag is missing")
