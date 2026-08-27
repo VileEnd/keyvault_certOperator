@@ -80,7 +80,7 @@ Full setup guide, including troubleshooting: **[docs/azure-setup.md](docs/azure-
 
 ```hcl
 module "certoperator_identity" {
-  source = "github.com/VileEnd/keyvault_certOperator//terraform?ref=v0.1.0"
+  source = "github.com/VileEnd/keyvault_certOperator//terraform?ref=v0.1.1"
 
   resource_group_name = "my-rg"
   location            = "westeurope"
@@ -111,7 +111,7 @@ default.
 
 ```bash
 helm upgrade --install keyvault-certoperator \
-  oci://ghcr.io/vileend/charts/keyvault-certoperator --version 0.1.0 \
+  oci://ghcr.io/vileend/charts/keyvault-certoperator --version 0.1.1 \
   --namespace keyvault-certoperator-system --create-namespace \
   --set azure.clientId=<managed-identity-client-id> \
   --set serviceAccount.name=keyvault-certoperator
@@ -120,13 +120,13 @@ helm upgrade --install keyvault-certoperator \
 Or with kustomize, in one URL:
 
 ```bash
-kubectl apply -f https://github.com/VileEnd/keyvault_certOperator/releases/download/v0.1.0/install.yaml
+kubectl apply -f https://github.com/VileEnd/keyvault_certOperator/releases/download/v0.1.1/install.yaml
 ```
 
 From a clone, `./charts/keyvault-certoperator` and `make deploy IMG=<your-image>`
 both still work; that is the development path.
 
-> **Upgrading from a clone predating v0.1.0.** The CRDs used to sit in the
+> **Upgrading from a clone predating v0.1.1.** The CRDs used to sit in the
 > chart's `crds/` directory, which Helm installs once and never updates. They
 > are now ordinary templates, so `helm upgrade` keeps them current — but Helm
 > will not adopt objects it did not create, and refuses the upgrade by name:
@@ -451,7 +451,7 @@ Application Gateway rotation, so a regression there degrades the vault quietly.
 
 ### Cutting a release
 
-From the Actions tab: run **Release**, give it the tag (`v0.1.0`) and tick
+From the Actions tab: run **Release**, give it the tag (`v0.1.1`) and tick
 **create_tag**. It does the whole thing in one run — creates the tag, builds and
 pushes the multi-arch image, publishes the chart to
 `oci://ghcr.io/vileend/charts`, and opens a GitHub release with `install.yaml`
@@ -467,11 +467,17 @@ publish nothing.
 Pushing a tag by hand works too, and triggers the same workflow:
 
 ```bash
-git tag -a v0.1.0 -m v0.1.0 && git push origin v0.1.0
+git tag -a v0.1.1 -m v0.1.1 && git push origin v0.1.1
 ```
 
 If publishing fails after the tag exists, re-run **Release** with the same tag
-and **create_tag** off, rather than deleting and re-pushing a released tag.
+and **create_tag** off, rather than deleting and re-pushing a released tag. The
+workflow definition comes from the default branch, so a fix there takes effect
+even though the tag's own tree still holds the old file.
+
+`v0.1.0` is such a tag and is deliberately left in place: its run created the
+tag and then failed on the image build, so it published nothing. The first
+release is `v0.1.1`.
 
 ## Uninstalling
 

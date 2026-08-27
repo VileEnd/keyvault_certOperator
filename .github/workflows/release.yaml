@@ -30,8 +30,6 @@ permissions:
 env:
   GO_VERSION: "1.26"
   REGISTRY: ghcr.io
-  IMAGE: ghcr.io/${{ github.repository_owner }}/keyvault-certoperator
-  CHART_REPO: oci://ghcr.io/${{ github.repository_owner }}/charts
 
 jobs:
   publish:
@@ -48,6 +46,19 @@ jobs:
           # Full history, so pushing a tag does not depend on what a shallow
           # clone happens to contain.
           fetch-depth: 0
+
+      # ghcr repository names must be lowercase, and github.repository_owner is
+      # not: "VileEnd" produced "invalid tag ...: repository name must be
+      # lowercase" the first time this workflow ran. Actions expressions have no
+      # toLower, so it is computed here and used everywhere, rather than being
+      # duplicated into env -- the duplication is what let the chart's lowercase
+      # default and this disagree unnoticed until the first release.
+      - name: Resolve the registry namespace
+        id: registry
+        run: |
+          owner="${{ github.repository_owner }}"
+          echo "image=ghcr.io/${owner,,}/keyvault-certoperator" >> "$GITHUB_OUTPUT"
+          echo "charts=oci://ghcr.io/${owner,,}/charts" >> "$GITHUB_OUTPUT"
 
       # The tag is the single source of the version. Deriving it here rather
       # than accepting an input keeps the image tag and the git tag identical by
@@ -131,8 +142,8 @@ jobs:
             || docker buildx use release
           docker buildx build --push \
             --platform linux/amd64,linux/arm64 \
-            -t "${{ env.IMAGE }}:${{ steps.version.outputs.tag }}" \
-            -t "${{ env.IMAGE }}:latest" \
+            -t "${{ steps.registry.outputs.image }}:${{ steps.version.outputs.tag }}" \
+            -t "${{ steps.registry.outputs.image }}:latest" \
             --cache-from type=local,src=/tmp/.buildx-cache \
             --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max .
           rm -rf /tmp/.buildx-cache
@@ -142,7 +153,7 @@ jobs:
       # successful push means a usable image.
       - name: Verify the published image can be pulled
         run: |
-          docker buildx imagetools inspect "${{ env.IMAGE }}:${{ steps.version.outputs.tag }}"
+          docker buildx imagetools inspect "${{ steps.registry.outputs.image }}:${{ steps.version.outputs.tag }}"
 
       # Publishing the chart is what makes the operator installable without
       # cloning the repository. OCI rather than a gh-pages index: same registry
@@ -155,16 +166,16 @@ jobs:
             -u ${{ github.actor }} --password-stdin <<< "${{ secrets.GITHUB_TOKEN }}"
           helm package charts/keyvault-certoperator --destination dist/
           helm push "dist/keyvault-certoperator-${{ steps.version.outputs.version }}.tgz" \
-            "${{ env.CHART_REPO }}"
+            "${{ steps.registry.outputs.charts }}"
 
       # Same reasoning as the image inspect above: a push that returned zero is
       # not proof that anyone can install what it pushed.
       - name: Verify the published chart can be installed from
         run: |
           export PATH="$PWD/bin:$PATH"
-          helm show chart "${{ env.CHART_REPO }}/keyvault-certoperator" \
+          helm show chart "${{ steps.registry.outputs.charts }}/keyvault-certoperator" \
             --version "${{ steps.version.outputs.version }}"
-          helm template release "${{ env.CHART_REPO }}/keyvault-certoperator" \
+          helm template release "${{ steps.registry.outputs.charts }}/keyvault-certoperator" \
             --version "${{ steps.version.outputs.version }}" \
             --set azure.clientId=00000000-0000-0000-0000-000000000000 > /dev/null
 
@@ -175,7 +186,7 @@ jobs:
         run: gh --version
 
       - name: Render the single-file installer
-        run: make build-installer IMG="${{ env.IMAGE }}:${{ steps.version.outputs.tag }}"
+        run: make build-installer IMG="${{ steps.registry.outputs.image }}:${{ steps.version.outputs.tag }}"
 
       # Pre-release on purpose. The operator has never run against a real Key
       # Vault -- the end-to-end suite proves the wire protocol against a
@@ -190,7 +201,7 @@ jobs:
 
           ```bash
           helm upgrade --install keyvault-certoperator \
-            oci://ghcr.io/${{ github.repository_owner }}/charts/keyvault-certoperator \
+            ${{ steps.registry.outputs.charts }}/keyvault-certoperator \
             --version ${{ steps.version.outputs.version }} \
             --namespace keyvault-certoperator-system --create-namespace \
             --set azure.clientId=<managed-identity-client-id> \

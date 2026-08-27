@@ -38,7 +38,7 @@ data "azurerm_key_vault" "this" {
 }
 
 module "certoperator_identity" {
-  source = "github.com/VileEnd/keyvault_certOperator//terraform?ref=v0.1.0"
+  source = "github.com/VileEnd/keyvault_certOperator//terraform?ref=v0.1.1"
 
   resource_group_name = "my-rg"
   location            = "westeurope"
@@ -56,7 +56,7 @@ resource "helm_release" "certoperator" {
 
   repository = "oci://ghcr.io/vileend/charts"
   chart      = "keyvault-certoperator"
-  version    = "0.1.0"
+  version    = "0.1.1"
 
   dynamic "set" {
     for_each = module.certoperator_identity.helm_values

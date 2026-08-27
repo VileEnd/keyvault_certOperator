@@ -44,5 +44,5 @@ variable "chart_name" {
 variable "chart_version" {
   description = "Chart version. Null tracks whatever the repository serves, which is not what you want in production."
   type        = string
-  default     = "0.1.0"
+  default     = "0.1.1"
 }
