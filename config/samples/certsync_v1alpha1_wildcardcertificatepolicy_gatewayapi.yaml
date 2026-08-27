@@ -17,6 +17,19 @@ spec:
 
   maxCertificates: 10
 
+  # Issue *.x.com and *.sub.x.com whether or not anything in the cluster routes
+  # a name under them yet.
+  #
+  # Discovery answers "what does the cluster route today", which is empty
+  # before the first workload exists. But an Application Gateway listener
+  # cannot reference a Key Vault certificate that does not exist yet, so
+  # without this a brand-new zone is a chicken-and-egg problem: the gateway
+  # waits for the certificate, and the certificate waits for a workload.
+  #
+  # Seeded names pass the same zone allowlist, public-suffix check and
+  # certificate cap as a discovered one.
+  issueZoneWildcards: true
+
   discovery:
     # No Ingress resources here, so skip listing a type that is always empty.
     ingress: false

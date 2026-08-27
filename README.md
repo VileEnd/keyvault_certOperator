@@ -177,6 +177,7 @@ for a commented example.
 | `discovery.ingress` | `true` | Discover from `networking.k8s.io` Ingresses. |
 | `discovery.httpRoutes` | `true` | Only watched if Gateway API CRDs exist at operator start. |
 | `discovery.gateways` | `true` | Gateway listener hostnames. Same startup constraint. See below. |
+| `issueZoneWildcards` | `false` | Issue `*.<zone>` for every zone even if nothing routes it yet. |
 | `discovery.namespaceSelector` | all | Narrow discovery by namespace labels. |
 | `grouping` | `PerZone` | One SAN certificate per zone, or `PerWildcard`. |
 | `issuerRef` | — | Referenced, never created. Must use a DNS-01 solver. |

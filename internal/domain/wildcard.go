@@ -61,6 +61,18 @@ type PlanInput struct {
 	MaxCertificates int
 	// Grouping selects the packing strategy; empty means GroupingPerZone.
 	Grouping Grouping
+	// IssueZoneWildcards plans "*.zone" for every configured zone, whether or
+	// not anything in the cluster routes a name under it.
+	//
+	// Discovery alone cannot express "this gateway must always serve *.x.com".
+	// It answers "what does the cluster route today", which is empty before the
+	// first workload exists -- and Application Gateway needs the certificate in
+	// Key Vault *before* a listener can reference it. That ordering makes the
+	// discovered-only behaviour a chicken-and-egg problem for a new zone.
+	//
+	// The seeded names go through exactly the same guards as a discovered one:
+	// the zone allowlist, the public-suffix check and the certificate cap.
+	IssueZoneWildcards bool
 }
 
 // Plan is the desired certificate state derived from discovered hostnames.
@@ -95,7 +107,19 @@ func BuildPlan(in PlanInput) (Plan, error) {
 	// zone -> set of required DNS names
 	required := map[string]map[string]struct{}{}
 
-	for _, raw := range in.Hosts {
+	hosts := in.Hosts
+	if in.IssueZoneWildcards {
+		// Seeded rather than special-cased downstream: "*.zone" is a hostname
+		// like any other, so it picks up the guards, the grouping and the
+		// naming without a second code path that could drift from the first.
+		seeded := make([]string, 0, len(zones)+len(hosts))
+		for _, zone := range zones {
+			seeded = append(seeded, "*."+zone)
+		}
+		hosts = append(seeded, hosts...)
+	}
+
+	for _, raw := range hosts {
 		host := NormalizeHost(raw)
 		if host == "" {
 			continue

@@ -3,6 +3,7 @@ package domain_test
 import (
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/VileEnd/keyvault_certOperator/internal/domain"
@@ -224,5 +225,93 @@ func TestSplitListenerHostnames(t *testing.T) {
 		if len(group) > domain.MaxListenerHostnames {
 			t.Errorf("group %v exceeds the listener cap of %d", group, domain.MaxListenerHostnames)
 		}
+	}
+}
+
+// Discovery answers "what does the cluster route today". That is empty before
+// the first workload exists, yet an Application Gateway listener cannot
+// reference a Key Vault certificate that does not exist yet -- so a new zone
+// could not be wired up at all without this.
+func TestBuildPlanIssuesZoneWildcardsWithoutDiscovery(t *testing.T) {
+	t.Parallel()
+	plan, err := domain.BuildPlan(domain.PlanInput{
+		Zones:              []string{"x.com", "xx.x.com"},
+		MaxCertificates:    10,
+		Grouping:           domain.GroupingPerZone,
+		IssueZoneWildcards: true,
+		Hosts:              nil, // nothing routed yet
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	got := map[string][]string{}
+	for _, cert := range plan.Certificates {
+		got[cert.Name] = cert.DNSNames
+	}
+	want := map[string][]string{
+		"wildcard-x-com":    {"*.x.com"},
+		"wildcard-xx-x-com": {"*.xx.x.com"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("certificates = %v, want %v", got, want)
+	}
+}
+
+// Seeded names are hostnames like any other, so a discovered host under the
+// same zone joins the same certificate rather than producing a second one.
+func TestBuildPlanMergesSeededWildcardsWithDiscoveredHosts(t *testing.T) {
+	t.Parallel()
+	plan, err := domain.BuildPlan(domain.PlanInput{
+		Zones:              []string{"x.com"},
+		MaxCertificates:    10,
+		Grouping:           domain.GroupingPerZone,
+		IssueZoneWildcards: true,
+		// The apex needs its own SAN: "*.x.com" does not match "x.com".
+		Hosts: []string{"api.x.com", "x.com"},
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if len(plan.Certificates) != 1 {
+		t.Fatalf("certificates = %d, want 1", len(plan.Certificates))
+	}
+	want := []string{"*.x.com", "x.com"}
+	got := slices.Clone(plan.Certificates[0].DNSNames)
+	slices.Sort(got)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("dnsNames = %v, want %v", got, want)
+	}
+}
+
+// The seeding must not become a way around the guards: a zone at or above a
+// public suffix is still unreachable, and the cap still applies.
+func TestBuildPlanSeedingStillHonoursTheGuards(t *testing.T) {
+	t.Parallel()
+	if _, err := domain.BuildPlan(domain.PlanInput{
+		Zones:              []string{"com"},
+		MaxCertificates:    10,
+		IssueZoneWildcards: true,
+	}); err == nil {
+		t.Error("a public-suffix zone must be rejected even when seeding")
+	}
+
+	// The cap reports the overflow rather than failing the whole plan, so the
+	// certificates that do fit are still issued and the rest are visible.
+	plan, err := domain.BuildPlan(domain.PlanInput{
+		Zones:              []string{"a.com", "b.com", "c.com"},
+		MaxCertificates:    2,
+		IssueZoneWildcards: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if len(plan.Certificates) != 2 {
+		t.Errorf("certificates = %d, want 2 -- the cap must apply to seeded wildcards", len(plan.Certificates))
+	}
+	if !slices.ContainsFunc(plan.Skipped, func(s domain.SkippedHost) bool {
+		return s.Reason == domain.ReasonMaxCertificates
+	}) {
+		t.Errorf("skipped = %+v, want the overflow reported with ReasonMaxCertificates", plan.Skipped)
 	}
 }

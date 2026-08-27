@@ -405,3 +405,56 @@ func TestSyncControllerRefusesAVaultOutsideTheAllowlist(t *testing.T) {
 		t.Errorf("imports = %d, want 0 -- a disallowed vault must never be written to", count)
 	}
 }
+
+// Nothing in the sync path inspects for a wildcard, but every other test in
+// this package uses one -- so the plain case was correct by construction and
+// never actually exercised. This closes that: no "*" anywhere.
+func TestSyncControllerSyncsACertificateWithNoWildcardAtAll(t *testing.T) {
+	requireEnvtest(t)
+	ctx := t.Context()
+	const namespace = "sync-plain"
+
+	if err := k8sClient.Create(ctx, newNamespace(namespace)); err != nil {
+		t.Fatalf("creating namespace: %v", err)
+	}
+
+	root := testutil.NewRootCA(t, "test root")
+	leaf := root.Issue(t, testutil.LeafOptions{
+		DNSNames: []string{"api.plain.com", "www.plain.com"},
+	})
+	if err := k8sClient.Create(ctx, newTLSSecret(t, namespace, "plain-tls", leaf)); err != nil {
+		t.Fatalf("creating secret: %v", err)
+	}
+
+	sync := &v1alpha1.KeyVaultCertificateSync{
+		ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: namespace},
+		Spec: v1alpha1.KeyVaultCertificateSyncSpec{
+			Source:   v1alpha1.CertificateSourceSpec{SecretRef: v1alpha1.LocalSecretReference{Name: "plain-tls"}},
+			KeyVault: v1alpha1.KeyVaultSpec{Name: "my-vault"},
+		},
+	}
+	if err := k8sClient.Create(ctx, sync); err != nil {
+		t.Fatalf("creating sync: %v", err)
+	}
+
+	// The Key Vault name is derived from the SANs, and for a plain certificate
+	// that derivation has no "wildcard-" prefix to add.
+	eventually(t, 30*time.Second, func() error {
+		var got v1alpha1.KeyVaultCertificateSync
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(sync), &got); err != nil {
+			return err
+		}
+		condition := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+		if condition == nil || condition.Status != metav1.ConditionTrue {
+			return fmt.Errorf("Ready condition = %+v, want True", condition)
+		}
+		if got.Status.CertificateName != "api-plain-com" {
+			return fmt.Errorf("certificateName = %q, want %q", got.Status.CertificateName, "api-plain-com")
+		}
+		return nil
+	})
+
+	if count := testVault.importCount("api-plain-com"); count != 1 {
+		t.Errorf("imports = %d, want 1", count)
+	}
+}

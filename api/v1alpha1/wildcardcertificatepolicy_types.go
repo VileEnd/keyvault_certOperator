@@ -107,6 +107,22 @@ type WildcardCertificatePolicySpec struct {
 	// +kubebuilder:validation:MaxItems=50
 	Zones []string `json:"zones"`
 
+	// IssueZoneWildcards issues "*.<zone>" for every zone in Zones, whether or
+	// not anything in the cluster routes a name under it.
+	//
+	// Discovery answers "what does the cluster route today", which is empty
+	// before the first workload exists -- and an Application Gateway listener
+	// cannot reference a Key Vault certificate that does not exist yet, so a
+	// new zone is otherwise a chicken-and-egg problem. Set this when the
+	// gateway must serve a zone's wildcard regardless of what is deployed
+	// behind it.
+	//
+	// The seeded names pass the same zone allowlist, public-suffix check and
+	// certificate cap as a discovered one.
+	// +optional
+	// +kubebuilder:default=false
+	IssueZoneWildcards bool `json:"issueZoneWildcards,omitempty"`
+
 	// MaxCertificates caps how many certificates may be planned. The overflow is
 	// reported in status rather than issued.
 	// +optional
