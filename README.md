@@ -449,6 +449,30 @@ import, a repeatedly-reconciled unchanged certificate must produce **zero**
 further imports. Key Vault versions are permanent and each one is a candidate
 Application Gateway rotation, so a regression there degrades the vault quietly.
 
+### Cutting a release
+
+From the Actions tab: run **Release**, give it the tag (`v0.1.0`) and tick
+**create_tag**. It does the whole thing in one run — creates the tag, builds and
+pushes the multi-arch image, publishes the chart to
+`oci://ghcr.io/vileend/charts`, and opens a GitHub release with `install.yaml`
+attached.
+
+Tagging lives inside that workflow rather than in one of its own, for two
+reasons. The tag is minted only *after* the tests pass and the tag is confirmed
+to agree with `Chart.yaml` — a tag is permanent, so it should not be spent on a
+commit that does not build. And a tag pushed by `GITHUB_TOKEN` does not start a
+new workflow run, so a separate tagging workflow would create the tag and
+publish nothing.
+
+Pushing a tag by hand works too, and triggers the same workflow:
+
+```bash
+git tag -a v0.1.0 -m v0.1.0 && git push origin v0.1.0
+```
+
+If publishing fails after the tag exists, re-run **Release** with the same tag
+and **create_tag** off, rather than deleting and re-pushing a released tag.
+
 ## Uninstalling
 
 Delete the `WildcardCertificatePolicy` and `KeyVaultCertificateSync` resources
