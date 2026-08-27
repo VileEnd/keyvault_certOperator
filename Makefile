@@ -10,6 +10,9 @@ ENVTEST_K8S_VERSION ?= 1.36
 GOLANGCI_LINT_VERSION ?= v2.13.1
 KUSTOMIZE_VERSION ?= v5.8.1
 HELM_VERSION ?= v3.19.0
+# Terraform is no longer present on the GitHub runner image, so CI installs it
+# the same way a developer machine does.
+TERRAFORM_VERSION ?= 1.14.3
 # Pinned so CI and a developer machine run the same Kubernetes, and so the
 # download is reproducible rather than whatever get.k3s.io serves today.
 K3S_VERSION ?= v1.36.3+k3s1
@@ -19,6 +22,7 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
 HELM ?= $(LOCALBIN)/helm
+TERRAFORM ?= $(LOCALBIN)/terraform
 
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
@@ -148,6 +152,30 @@ golangci-lint: $(LOCALBIN)
 .PHONY: kustomize
 kustomize: $(LOCALBIN)
 	@test -x $(LOCALBIN)/kustomize || GOBIN=$(LOCALBIN) go install sigs.k8s.io/kustomize/kustomize/v5@$(KUSTOMIZE_VERSION)
+
+.PHONY: terraform
+terraform: $(LOCALBIN)
+	@test -x $(TERRAFORM) || { \
+		tmp=$$(mktemp -d); \
+		base="https://releases.hashicorp.com/terraform/$(TERRAFORM_VERSION)"; \
+		zip="terraform_$(TERRAFORM_VERSION)_linux_amd64.zip"; \
+		curl -sSLf -o "$$tmp/$$zip" "$$base/$$zip"; \
+		curl -sSLf -o "$$tmp/sums" "$$base/terraform_$(TERRAFORM_VERSION)_SHA256SUMS"; \
+		(cd "$$tmp" && grep " $$zip$$" sums | sha256sum -c -); \
+		unzip -oq "$$tmp/$$zip" -d $(LOCALBIN); \
+		rm -rf "$$tmp"; \
+	}
+
+.PHONY: tf-fmt
+tf-fmt: terraform ## Fail if the Terraform sources are not formatted.
+	$(TERRAFORM) fmt -check -recursive terraform/
+
+.PHONY: tf-validate
+tf-validate: terraform ## Validate the Terraform module and example against the real provider schema.
+	$(TERRAFORM) -chdir=terraform init -backend=false -input=false
+	$(TERRAFORM) -chdir=terraform validate
+	$(TERRAFORM) -chdir=terraform/examples/aks init -backend=false -input=false
+	$(TERRAFORM) -chdir=terraform/examples/aks validate
 
 .PHONY: print-k3s-version
 print-k3s-version: ## Print the pinned k3s version, so CI installs what the Makefile says.
