@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/VileEnd/keyvault_certOperator/api/v1alpha1"
+	"github.com/VileEnd/keyvault_certOperator/internal/controller"
 )
 
 func newIngress(namespace, name string, hosts ...string) *networkingv1.Ingress {
@@ -305,4 +306,250 @@ func TestPolicyPrunesOnlyWhenAskedAndNeverTouchesKeyVault(t *testing.T) {
 	if err := k8sClient.Get(ctx, alphaKey, &alpha); err != nil {
 		t.Errorf("the still-required certificate was removed: %v", err)
 	}
+}
+
+// Pruning is judged entirely against the current discovery pass. A pass that
+// succeeds while finding nothing is indistinguishable from a misconfigured one
+// -- a namespaceSelector matching no namespace, or every source switched off --
+// and acting on it deletes every generated Certificate, which destroys the
+// issued Secret and costs a fresh issuance against Let's Encrypt's duplicate
+// limit to recover.
+func TestPolicyWithholdsPruningWhenDiscoveryFindsNothing(t *testing.T) {
+	requireEnvtest(t)
+	ctx := t.Context()
+	const apps = "withhold-apps"
+	const certs = "withhold-certs"
+
+	for _, ns := range []string{apps, certs} {
+		if err := k8sClient.Create(ctx, newNamespace(ns)); err != nil {
+			t.Fatalf("creating namespace %s: %v", ns, err)
+		}
+	}
+
+	ingress := newIngress(apps, "only", "a.withhold.com")
+	if err := k8sClient.Create(ctx, ingress); err != nil {
+		t.Fatalf("creating ingress: %v", err)
+	}
+
+	policy := &v1alpha1.WildcardCertificatePolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "withholding"},
+		Spec: v1alpha1.WildcardCertificatePolicySpec{
+			Zones:                []string{"withhold.com"},
+			MaxCertificates:      10,
+			Grouping:             v1alpha1.GroupingPerZone,
+			IssuerRef:            v1alpha1.IssuerReference{Name: "letsencrypt-dns", Kind: "ClusterIssuer", Group: "cert-manager.io"},
+			CertificateNamespace: certs,
+			KeyVault:             v1alpha1.KeyVaultSpec{Name: "my-vault"},
+			OrphanPolicy:         v1alpha1.OrphanPrune,
+		},
+	}
+	if err := k8sClient.Create(ctx, policy); err != nil {
+		t.Fatalf("creating policy: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, policy) })
+
+	key := client.ObjectKey{Namespace: certs, Name: "wildcard-withhold-com"}
+	eventually(t, 30*time.Second, func() error {
+		var cert cmapi.Certificate
+		return k8sClient.Get(ctx, key, &cert)
+	})
+
+	// Remove the only routed hostname, so the next pass plans nothing at all.
+	if err := k8sClient.Delete(ctx, ingress); err != nil {
+		t.Fatalf("deleting ingress: %v", err)
+	}
+
+	// The policy must notice and say so...
+	eventually(t, 30*time.Second, func() error {
+		var got v1alpha1.WildcardCertificatePolicy
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), &got); err != nil {
+			return err
+		}
+		condition := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+		if condition == nil || condition.Reason != controller.ReasonPruneWithheld {
+			return fmt.Errorf("Ready condition = %+v, want reason %s", condition, controller.ReasonPruneWithheld)
+		}
+		return nil
+	})
+
+	// ...and crucially, must not have deleted anything. Checked after the
+	// condition so a slow prune cannot pass by racing the assertion.
+	var cert cmapi.Certificate
+	if err := k8sClient.Get(ctx, key, &cert); err != nil {
+		t.Errorf("the generated Certificate was deleted on an empty discovery pass: %v", err)
+	}
+	var sync v1alpha1.KeyVaultCertificateSync
+	if err := k8sClient.Get(ctx, key, &sync); err != nil {
+		t.Errorf("the generated sync resource was deleted on an empty discovery pass: %v", err)
+	}
+}
+
+// A source the policy explicitly asked for but which the operator could not
+// watch makes the discovered set partial by construction, so pruning against it
+// is unsafe even when the plan is not empty.
+//
+// Only an explicit "true" counts. The CRD defaults these to true, so treating
+// the effective value as a requirement would withhold pruning on every cluster
+// that does not run Gateway API -- which is most of them.
+func TestPolicyWithholdsPruningWhenAnExplicitlyRequestedSourceIsUnavailable(t *testing.T) {
+	requireEnvtest(t)
+	ctx := t.Context()
+	const apps = "withhold-src-apps"
+	const certs = "withhold-src-certs"
+
+	for _, ns := range []string{apps, certs} {
+		if err := k8sClient.Create(ctx, newNamespace(ns)); err != nil {
+			t.Fatalf("creating namespace %s: %v", ns, err)
+		}
+	}
+
+	ingress := newIngress(apps, "pair", "a.src.com", "a.other.com")
+	if err := k8sClient.Create(ctx, ingress); err != nil {
+		t.Fatalf("creating ingress: %v", err)
+	}
+
+	// The suite runs with GatewaysAvailable false, so asking for it explicitly
+	// reproduces a restart before the Gateway API CRDs were registered.
+	wanted := true
+	policy := &v1alpha1.WildcardCertificatePolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "withholding-source"},
+		Spec: v1alpha1.WildcardCertificatePolicySpec{
+			Zones:                []string{"src.com", "other.com"},
+			MaxCertificates:      10,
+			Grouping:             v1alpha1.GroupingPerZone,
+			Discovery:            &v1alpha1.DiscoverySpec{Gateways: &wanted},
+			IssuerRef:            v1alpha1.IssuerReference{Name: "letsencrypt-dns", Kind: "ClusterIssuer", Group: "cert-manager.io"},
+			CertificateNamespace: certs,
+			KeyVault:             v1alpha1.KeyVaultSpec{Name: "my-vault"},
+			OrphanPolicy:         v1alpha1.OrphanPrune,
+		},
+	}
+	if err := k8sClient.Create(ctx, policy); err != nil {
+		t.Fatalf("creating policy: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, policy) })
+
+	otherKey := client.ObjectKey{Namespace: certs, Name: "wildcard-other-com"}
+	eventually(t, 30*time.Second, func() error {
+		var cert cmapi.Certificate
+		return k8sClient.Get(ctx, otherKey, &cert)
+	})
+
+	// Narrow to one zone, so other.com is orphaned but the plan is not empty --
+	// isolating this guard from the empty-plan one.
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var current networkingv1.Ingress
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(ingress), &current); err != nil {
+			return err
+		}
+		current.Spec.Rules = []networkingv1.IngressRule{{Host: "a.src.com"}}
+		return k8sClient.Update(ctx, &current)
+	}); err != nil {
+		t.Fatalf("narrowing the ingress: %v", err)
+	}
+
+	eventually(t, 30*time.Second, func() error {
+		var got v1alpha1.WildcardCertificatePolicy
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), &got); err != nil {
+			return err
+		}
+		condition := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+		if condition == nil || condition.Reason != controller.ReasonPruneWithheld {
+			return fmt.Errorf("Ready condition = %+v, want reason %s", condition, controller.ReasonPruneWithheld)
+		}
+		return nil
+	})
+
+	var cert cmapi.Certificate
+	if err := k8sClient.Get(ctx, otherKey, &cert); err != nil {
+		t.Errorf("pruned against an incomplete discovered set: %v", err)
+	}
+}
+
+// The inverse of the test above, and the one that matters most.
+//
+// The withholding guard reads spec.discovery.gateways to tell "the user
+// requires this source" from "the user said nothing". That distinction only
+// survives if the field is genuinely absent when unset -- and structural
+// defaulting would materialise it into every stored object that carries a
+// discovery block at all. When that happened, pruning was withheld forever on
+// any cluster without Gateway API, which is most of them.
+//
+// So: a discovery block that does not mention gateways must still prune.
+func TestPolicyPrunesWhenDiscoveryOmitsTheUnavailableSource(t *testing.T) {
+	requireEnvtest(t)
+	ctx := t.Context()
+	const apps = "omits-apps"
+	const certs = "omits-certs"
+
+	for _, ns := range []string{apps, certs} {
+		if err := k8sClient.Create(ctx, newNamespace(ns)); err != nil {
+			t.Fatalf("creating namespace %s: %v", ns, err)
+		}
+	}
+
+	ingress := newIngress(apps, "pair", "a.keep.com", "a.drop.com")
+	if err := k8sClient.Create(ctx, ingress); err != nil {
+		t.Fatalf("creating ingress: %v", err)
+	}
+
+	useIngress := true
+	policy := &v1alpha1.WildcardCertificatePolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "omitting-source"},
+		Spec: v1alpha1.WildcardCertificatePolicySpec{
+			Zones:           []string{"keep.com", "drop.com"},
+			MaxCertificates: 10,
+			Grouping:        v1alpha1.GroupingPerZone,
+			// A discovery block that says nothing about gateways. The suite runs
+			// with GatewaysAvailable false, so if the field were defaulted to
+			// true this policy would never prune again.
+			Discovery:            &v1alpha1.DiscoverySpec{Ingress: &useIngress},
+			IssuerRef:            v1alpha1.IssuerReference{Name: "letsencrypt-dns", Kind: "ClusterIssuer", Group: "cert-manager.io"},
+			CertificateNamespace: certs,
+			KeyVault:             v1alpha1.KeyVaultSpec{Name: "my-vault"},
+			OrphanPolicy:         v1alpha1.OrphanPrune,
+		},
+	}
+	if err := k8sClient.Create(ctx, policy); err != nil {
+		t.Fatalf("creating policy: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, policy) })
+
+	// Guards against the API server quietly reintroducing the default.
+	var stored v1alpha1.WildcardCertificatePolicy
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), &stored); err != nil {
+		t.Fatalf("reading back the policy: %v", err)
+	}
+	if stored.Spec.Discovery.Gateways != nil {
+		t.Fatalf("spec.discovery.gateways was materialised as %v; it must stay unset so the "+
+			"withholding guard can tell a requirement from a default", *stored.Spec.Discovery.Gateways)
+	}
+
+	dropKey := client.ObjectKey{Namespace: certs, Name: "wildcard-drop-com"}
+	eventually(t, 30*time.Second, func() error {
+		var cert cmapi.Certificate
+		return k8sClient.Get(ctx, dropKey, &cert)
+	})
+
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var current networkingv1.Ingress
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(ingress), &current); err != nil {
+			return err
+		}
+		current.Spec.Rules = []networkingv1.IngressRule{{Host: "a.keep.com"}}
+		return k8sClient.Update(ctx, &current)
+	}); err != nil {
+		t.Fatalf("narrowing the ingress: %v", err)
+	}
+
+	// The prune must actually happen.
+	eventually(t, 30*time.Second, func() error {
+		var cert cmapi.Certificate
+		if err := k8sClient.Get(ctx, dropKey, &cert); err == nil {
+			return fmt.Errorf("certificate still present; pruning was withheld when it should not have been")
+		} else if !apierrors.IsNotFound(err) {
+			return err
+		}
+		return nil
+	})
 }

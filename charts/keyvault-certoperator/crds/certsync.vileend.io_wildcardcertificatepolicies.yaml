@@ -77,7 +77,6 @@ spec:
                 description: Discovery selects the sources of hostnames.
                 properties:
                   gateways:
-                    default: true
                     description: |-
                       Gateways enables discovery from the hostnames declared on Gateway API
                       Gateway listeners.
@@ -91,19 +90,31 @@ spec:
                       HTTP because TLS is already terminated upstream at Application Gateway,
                       which is exactly the topology this operator serves; the hostname is still
                       a hostname the cluster routes.
+
+                      Unset means "use it when available". Setting it explicitly to true states
+                      a requirement: pruning is then withheld if the CRDs were absent at
+                      startup, because the discovered set would be incomplete.
                     type: boolean
                   httpRoutes:
-                    default: true
                     description: |-
                       HTTPRoutes enables discovery from Gateway API HTTPRoute resources.
 
                       The watch can only be established if the Gateway API CRDs are present when
                       the operator starts, so installing Gateway API later requires a restart.
+
+                      Unset means "use it when available". Setting it explicitly to true states
+                      a requirement: pruning is then withheld if the CRDs were absent at
+                      startup, because the discovered set would be incomplete.
                     type: boolean
                   ingress:
-                    default: true
-                    description: Ingress enables discovery from networking.k8s.io
-                      Ingress resources.
+                    description: |-
+                      Ingress enables discovery from networking.k8s.io Ingress resources.
+
+                      Unset means "use this source when it is available", which is the default
+                      behaviour. It is deliberately left unset rather than defaulted to true:
+                      structural defaulting would materialise the value into every stored
+                      object, erasing the difference between a source the user required and one
+                      they never mentioned.
                     type: boolean
                   namespaceSelector:
                     description: |-
@@ -254,8 +265,16 @@ spec:
                 type: integer
               orphanPolicy:
                 default: Retain
-                description: OrphanPolicy decides what happens to no-longer-required
-                  certificates.
+                description: |-
+                  OrphanPolicy decides what happens to no-longer-required certificates.
+
+                  Prune is guarded: pruning is judged against the current discovery pass, so
+                  the operator withholds it when that pass planned nothing at all, or when a
+                  source the policy explicitly enabled was unavailable at startup. Either
+                  case is reported as PruneWithheld rather than acted on, because deleting a
+                  generated Certificate destroys the issued Secret. Setting
+                  IssueZoneWildcards removes the empty-pass case by making the plan
+                  independent of discovery.
                 enum:
                 - Retain
                 - Prune

@@ -38,7 +38,7 @@ data "azurerm_key_vault" "this" {
 }
 
 module "certoperator_identity" {
-  source = "github.com/VileEnd/keyvault_certOperator//terraform"
+  source = "github.com/VileEnd/keyvault_certOperator//terraform?ref=v0.1.0"
 
   resource_group_name = "my-rg"
   location            = "westeurope"

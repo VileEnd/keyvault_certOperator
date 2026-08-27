@@ -1,0 +1,90 @@
+name: Release
+
+# Publishing is what makes a tag mean anything here. The chart defaults to
+# ghcr.io/vileend/keyvault-certoperator with the tag derived from appVersion, so
+# without this workflow `helm install` from a clean checkout produces an
+# ImagePullBackOff -- which is why the CI deploy job overrides the image and
+# sets pullPolicy=Never.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build, for re-running a release that failed after tagging.
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  GO_VERSION: "1.26"
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/${{ github.repository_owner }}/keyvault-certoperator
+
+jobs:
+  image:
+    name: Publish the container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # The tag is the single source of the version. Deriving it here rather
+      # than accepting an input keeps the image tag and the git tag identical by
+      # construction.
+      - name: Resolve the version
+        id: version
+        run: |
+          ref="${{ inputs.tag || github.ref_name }}"
+          echo "tag=${ref}" >> "$GITHUB_OUTPUT"
+          echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+
+      # A tag whose version disagrees with the chart would ship an image the
+      # chart cannot find, since the chart's image tag defaults to appVersion.
+      - name: Refuse to publish if the chart disagrees
+        run: |
+          chart=$(grep '^appVersion:' charts/keyvault-certoperator/Chart.yaml | tr -d '"' | awk '{print $2}')
+          if [ "$chart" != "${{ steps.version.outputs.version }}" ]; then
+            echo "tag ${{ steps.version.outputs.tag }} implies appVersion ${{ steps.version.outputs.version }},"
+            echo "but Chart.yaml declares ${chart}. The chart resolves its image tag from appVersion,"
+            echo "so publishing this would produce an image the chart never pulls."
+            exit 1
+          fi
+
+      - name: Log in to the registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+
+      # Same buildx + actions/cache pattern the deploy job uses, so the gate
+      # stays free of third-party actions.
+      - name: Cache image layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: buildx-release-${{ runner.os }}-${{ hashFiles('go.sum', 'Dockerfile') }}
+          restore-keys: |
+            buildx-release-${{ runner.os }}-
+            buildx-${{ runner.os }}-
+
+      - name: Build and push
+        run: |
+          docker buildx create --name release --driver docker-container --use 2>/dev/null \
+            || docker buildx use release
+          docker buildx build --push \
+            --platform linux/amd64,linux/arm64 \
+            -t "${{ env.IMAGE }}:${{ steps.version.outputs.tag }}" \
+            -t "${{ env.IMAGE }}:latest" \
+            --cache-from type=local,src=/tmp/.buildx-cache \
+            --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max .
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      # Proves the artifact is actually pullable, rather than assuming a
+      # successful push means a usable image.
+      - name: Verify the published image can be pulled
+        run: |
+          docker buildx imagetools inspect "${{ env.IMAGE }}:${{ steps.version.outputs.tag }}"
