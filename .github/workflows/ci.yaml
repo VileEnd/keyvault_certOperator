@@ -32,7 +32,7 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/go-tools
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -45,7 +45,7 @@ jobs:
     name: Unit and envtest
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/go-tools
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -59,7 +59,7 @@ jobs:
       - run: go vet -tags e2e ./test/...
       - name: Upload coverage
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: cover.out
@@ -69,7 +69,7 @@ jobs:
     name: Generated files are current
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/go-tools
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -82,7 +82,7 @@ jobs:
     name: Helm chart
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/go-tools
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -111,7 +111,7 @@ jobs:
     name: Known vulnerabilities
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/go-tools
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -125,7 +125,7 @@ jobs:
     name: Terraform
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Terraform is not on the runner image, so it is installed from the
       # version the Makefile pins, checksum-verified, into the cached ./bin --
       # the same path every other tool in this repo takes.
@@ -144,7 +144,7 @@ jobs:
     name: End-to-end (k3s)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/go-tools
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -198,7 +198,7 @@ jobs:
     name: End-to-end with cert-manager issuing
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/go-tools
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -252,7 +252,7 @@ jobs:
     name: Deploys and runs in-cluster
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/go-tools
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -260,7 +260,7 @@ jobs:
       # download` inside the image. Still a first-party-actions-only gate:
       # buildx ships with the runner and the cache is actions/cache.
       - name: Cache image layers
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /tmp/.buildx-cache
           key: buildx-${{ runner.os }}-${{ hashFiles('go.sum', 'Dockerfile') }}-${{ github.sha }}
