@@ -7,7 +7,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.14.0
 	github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azcertificates v1.5.0
 	github.com/cert-manager/cert-manager v1.21.1
-	github.com/prometheus/client_golang v1.23.2
+	github.com/prometheus/client_golang v1.24.1
 	golang.org/x/net v0.58.0
 	k8s.io/api v0.36.4
 	k8s.io/apimachinery v0.36.4
@@ -65,8 +65,8 @@ require (
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
-	github.com/prometheus/common v0.67.5 // indirect
-	github.com/prometheus/procfs v0.19.2 // indirect
+	github.com/prometheus/common v0.70.1 // indirect
+	github.com/prometheus/procfs v0.21.1 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
