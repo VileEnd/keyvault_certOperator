@@ -31,6 +31,16 @@ import (
 // alongside the sample.
 const maxReportedSkippedHosts = 50
 
+// These mirror the MaxItems on the status fields they bound. The API server
+// rejects a status that exceeds them, and a rejected status update is not a
+// cosmetic failure: the policy would report nothing at all, on every pass,
+// forever. Verified against a real API server -- 101 listeners and 101 SANs are
+// both refused.
+const (
+	maxReportedListeners = 100
+	maxReportedDNSNames  = 100
+)
+
 // DefaultDiscoveryInterval is how often discovery re-runs without an event.
 const DefaultDiscoveryInterval = 10 * time.Minute
 
@@ -51,6 +61,10 @@ type WildcardCertificatePolicyReconciler struct {
 	HTTPRoutesAvailable bool
 	// GatewaysAvailable records the same for the Gateway kind.
 	GatewaysAvailable bool
+
+	// Cloud is the Azure cloud the operator's identity lives in. It resolves a
+	// bare vault name on any resource that does not name a cloud of its own.
+	Cloud azure.Cloud
 
 	// AllowedVaults bounds which Key Vaults this operator may write to. Empty
 	// permits every vault, which is the behaviour that existed before the flag
@@ -95,7 +109,14 @@ func (r *WildcardCertificatePolicyReconciler) Reconcile(ctx context.Context, req
 		}
 	}
 
-	state, err := r.plan(ctx, &policy)
+	// What already exists is read before planning, so the certificate cap can
+	// overflow a new certificate rather than evict one the cluster is serving.
+	existing, err := r.generatedCertificateNames(ctx, &policy)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	state, err := r.plan(ctx, &policy, existing)
 	if err != nil {
 		reason, retryable := classify(err)
 		log.Error(err, "discovery failed", "reason", reason)
@@ -115,6 +136,12 @@ func (r *WildcardCertificatePolicyReconciler) Reconcile(ctx context.Context, req
 
 	available, err := r.Certificates.Available(ctx)
 	if err != nil {
+		// The plan is already computed and worth keeping: without this the
+		// discovery result is thrown away on a transient mapper failure and the
+		// policy reports the state from some earlier pass instead.
+		if statusErr := r.updateStatus(ctx, &policy); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
 		return ctrl.Result{}, err
 	}
 	if !available {
@@ -180,10 +207,30 @@ func (r *WildcardCertificatePolicyReconciler) Reconcile(ctx context.Context, req
 	return ctrl.Result{RequeueAfter: jitter(DefaultDiscoveryInterval)}, nil
 }
 
-func (r *WildcardCertificatePolicyReconciler) plan(
+// generatedCertificateNames lists the certificates this policy has already
+// generated. It reads the sync resources rather than status.requiredCertificates
+// because the question is what exists, not what was last planned.
+func (r *WildcardCertificatePolicyReconciler) generatedCertificateNames(
 	ctx context.Context, policy *v1alpha1.WildcardCertificatePolicy,
+) ([]string, error) {
+	var syncs v1alpha1.KeyVaultCertificateSyncList
+	if err := r.List(ctx, &syncs,
+		client.InNamespace(policy.Spec.CertificateNamespace),
+		client.MatchingLabels{v1alpha1.LabelPolicy: policy.Name},
+	); err != nil {
+		return nil, fmt.Errorf("listing generated sync resources: %w", err)
+	}
+	names := make([]string, 0, len(syncs.Items))
+	for i := range syncs.Items {
+		names = append(names, syncs.Items[i].Name)
+	}
+	return names, nil
+}
+
+func (r *WildcardCertificatePolicyReconciler) plan(
+	ctx context.Context, policy *v1alpha1.WildcardCertificatePolicy, existing []string,
 ) (app.DesiredState, error) {
-	vaultURL, err := azure.VaultURL(vaultTarget(policy.Spec.KeyVault), azure.Cloud(policy.Spec.KeyVault.Cloud))
+	vaultURL, err := azure.VaultURL(vaultTarget(policy.Spec.KeyVault), vaultCloud(policy.Spec.KeyVault, r.Cloud))
 	if err != nil {
 		return app.DesiredState{}, fmt.Errorf("%w: %w", domain.ErrInvalidVaultName, err)
 	}
@@ -212,6 +259,7 @@ func (r *WildcardCertificatePolicyReconciler) plan(
 	return app.NewPlanner(hosts).Plan(ctx, app.PolicySpec{
 		Zones:              policy.Spec.Zones,
 		MaxCertificates:    int(policy.Spec.MaxCertificates),
+		Existing:           existing,
 		Grouping:           domain.Grouping(policy.Spec.Grouping),
 		IssueZoneWildcards: policy.Spec.IssueZoneWildcards,
 		VaultURL:           vaultURL,
@@ -388,17 +436,23 @@ func (r *WildcardCertificatePolicyReconciler) recordPlan(
 	policy.Status.SkippedHostCount = int32(len(state.Skipped))
 	policy.Status.LastDiscoveryTime = &now
 
+	policy.Status.RequiredCertificateCount = int32(len(state.Certificates))
 	policy.Status.RequiredCertificates = make([]v1alpha1.PlannedCertificate, 0, len(state.Certificates))
+	listenerCount := 0
 	listeners := make([]v1alpha1.ListenerGuidance, 0, len(state.Certificates))
 	for _, cert := range state.Certificates {
 		policy.Status.RequiredCertificates = append(policy.Status.RequiredCertificates, v1alpha1.PlannedCertificate{
 			Name:             cert.Name,
 			Zone:             cert.Zone,
-			DNSNames:         cert.DNSNames,
+			DNSNames:         truncate(cert.DNSNames, maxReportedDNSNames),
 			SecretName:       cert.SecretName,
 			SecretIdentifier: cert.SecretIdentifier,
 		})
 		for _, group := range cert.Listeners {
+			listenerCount++
+			if len(listeners) >= maxReportedListeners {
+				continue
+			}
 			listeners = append(listeners, v1alpha1.ListenerGuidance{
 				Hostnames:        group,
 				KeyVaultSecretID: cert.SecretIdentifier,
@@ -408,12 +462,12 @@ func (r *WildcardCertificatePolicyReconciler) recordPlan(
 
 	// Emitted as data for Terraform or the CLI to apply. The operator holds no
 	// ARM permissions and never writes gateway configuration itself.
-	policy.Status.ApplicationGateway = &v1alpha1.ApplicationGatewayGuidance{Listeners: listeners}
-
-	skipped := state.Skipped
-	if len(skipped) > maxReportedSkippedHosts {
-		skipped = skipped[:maxReportedSkippedHosts]
+	policy.Status.ApplicationGateway = &v1alpha1.ApplicationGatewayGuidance{
+		Listeners:     listeners,
+		ListenerCount: int32(listenerCount),
 	}
+
+	skipped := truncate(state.Skipped, maxReportedSkippedHosts)
 	policy.Status.SkippedHosts = make([]v1alpha1.SkippedHost, 0, len(skipped))
 	for _, host := range skipped {
 		policy.Status.SkippedHosts = append(policy.Status.SkippedHosts,
@@ -427,13 +481,7 @@ func (r *WildcardCertificatePolicyReconciler) recordPlan(
 func (r *WildcardCertificatePolicyReconciler) updateStatus(
 	ctx context.Context, policy *v1alpha1.WildcardCertificatePolicy,
 ) error {
-	if err := r.Status().Update(ctx, policy); err != nil {
-		if client.IgnoreNotFound(err) == nil {
-			return nil
-		}
-		return fmt.Errorf("updating status: %w", err)
-	}
-	return nil
+	return updateStatus(ctx, r.Client, policy)
 }
 
 func (r *WildcardCertificatePolicyReconciler) event(obj *v1alpha1.WildcardCertificatePolicy,
@@ -509,6 +557,14 @@ func enabled(discovery *v1alpha1.DiscoverySpec, pick func(*v1alpha1.DiscoverySpe
 	}
 	value := pick(discovery)
 	return value == nil || *value
+}
+
+// truncate bounds a status list to what the CRD accepts, without copying.
+func truncate[T any](items []T, max int) []T {
+	if len(items) <= max {
+		return items
+	}
+	return items[:max]
 }
 
 func orphanVerb(policy v1alpha1.OrphanPolicy) string {

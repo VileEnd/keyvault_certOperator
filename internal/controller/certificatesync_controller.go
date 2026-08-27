@@ -7,7 +7,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -48,6 +47,10 @@ type KeyVaultCertificateSyncReconciler struct {
 	Source app.CertificateSource
 	Vault  app.VaultRepository
 	Clock  app.Clock
+
+	// Cloud is the Azure cloud the operator's identity lives in. It resolves a
+	// bare vault name on any resource that does not name a cloud of its own.
+	Cloud azure.Cloud
 
 	// AllowedVaults bounds which Key Vaults this operator may write to. Empty
 	// permits every vault, which is the behaviour that existed before the flag
@@ -118,7 +121,7 @@ func (r *KeyVaultCertificateSyncReconciler) Reconcile(ctx context.Context, req c
 func (r *KeyVaultCertificateSyncReconciler) sync(
 	ctx context.Context, sync *v1alpha1.KeyVaultCertificateSync,
 ) (app.SyncOutcome, error) {
-	vaultURL, err := azure.VaultURL(vaultTarget(sync.Spec.KeyVault), azure.Cloud(sync.Spec.KeyVault.Cloud))
+	vaultURL, err := azure.VaultURL(vaultTarget(sync.Spec.KeyVault), vaultCloud(sync.Spec.KeyVault, r.Cloud))
 	if err != nil {
 		return app.SyncOutcome{}, fmt.Errorf("%w: %w", domain.ErrInvalidVaultName, err)
 	}
@@ -150,6 +153,11 @@ func (r *KeyVaultCertificateSyncReconciler) applyOutcome(
 	now := metav1.NewTime(r.Clock.Now())
 	notAfter := metav1.NewTime(outcome.NotAfter)
 
+	// Captured before status is overwritten: the gauge is labelled by
+	// certificate name, so a rename would otherwise leave the old series
+	// exported forever, reporting an expiry nothing is refreshing any more.
+	previousName := sync.Status.CertificateName
+
 	sync.Status.ObservedGeneration = sync.Generation
 	sync.Status.CertificateName = outcome.CertificateName
 	sync.Status.SecretIdentifier = outcome.SecretIdentifier
@@ -169,15 +177,26 @@ func (r *KeyVaultCertificateSyncReconciler) applyOutcome(
 		r.event(sync, corev1.EventTypeNormal, ReasonImported, "Import", message)
 	}
 	if outcome.Warning != "" {
-		r.event(sync, corev1.EventTypeWarning, "ExpiryRegression", "Import", outcome.Warning)
+		r.event(sync, corev1.EventTypeWarning, outcome.WarningReason, "Sync", outcome.Warning)
 	}
 
 	setTrue(&sync.Status.Conditions, v1alpha1.ConditionSynced, reason, message, sync.Generation)
-	setTrue(&sync.Status.Conditions, v1alpha1.ConditionReady, ReasonSynced,
-		"certificate is available at "+outcome.SecretIdentifier, sync.Generation)
+	if outcome.WarningReason == domain.ReasonDisabledInVault {
+		// Synced is true -- the vault holds the right bytes -- but Ready is not,
+		// because the certificate is not actually being served. Reporting Ready
+		// here is what would let a listener stay down with nothing to look at.
+		setFalse(&sync.Status.Conditions, v1alpha1.ConditionReady,
+			domain.ReasonDisabledInVault, outcome.Warning, sync.Generation)
+	} else {
+		setTrue(&sync.Status.Conditions, v1alpha1.ConditionReady, ReasonSynced,
+			"certificate is available at "+outcome.SecretIdentifier, sync.Generation)
+	}
 
 	syncTotal.WithLabelValues(sync.Namespace, sync.Name, string(outcome.Action)).Inc()
 	lastSuccessTimestamp.WithLabelValues(sync.Namespace, sync.Name).Set(float64(r.Clock.Now().Unix()))
+	if previousName != "" && previousName != outcome.CertificateName {
+		certificateNotAfter.DeleteLabelValues(sync.Namespace, sync.Name, previousName)
+	}
 	certificateNotAfter.
 		WithLabelValues(sync.Namespace, sync.Name, outcome.CertificateName).
 		Set(float64(outcome.NotAfter.Unix()))
@@ -202,18 +221,10 @@ func (r *KeyVaultCertificateSyncReconciler) finalize(
 	return ctrl.Result{}, nil
 }
 
-// updateStatus writes status, tolerating a conflict by letting the next
-// reconcile recompute it rather than retrying a stale object.
 func (r *KeyVaultCertificateSyncReconciler) updateStatus(
 	ctx context.Context, sync *v1alpha1.KeyVaultCertificateSync,
 ) error {
-	if err := r.Status().Update(ctx, sync); err != nil {
-		if apierrors.IsConflict(err) {
-			return nil
-		}
-		return fmt.Errorf("updating status: %w", err)
-	}
-	return nil
+	return updateStatus(ctx, r.Client, sync)
 }
 
 func (r *KeyVaultCertificateSyncReconciler) event(obj *v1alpha1.KeyVaultCertificateSync,
@@ -295,6 +306,15 @@ func vaultTarget(spec v1alpha1.KeyVaultSpec) string {
 		return spec.VaultURL
 	}
 	return spec.Name
+}
+
+// vaultCloud picks the cloud a bare vault name resolves against: the one the
+// resource names, or the operator's own when it names none.
+func vaultCloud(spec v1alpha1.KeyVaultSpec, fallback azure.Cloud) azure.Cloud {
+	if spec.Cloud != "" {
+		return azure.Cloud(spec.Cloud)
+	}
+	return fallback
 }
 
 func resyncInterval(policy *v1alpha1.SyncPolicySpec) time.Duration {

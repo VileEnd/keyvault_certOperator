@@ -1,11 +1,14 @@
 package controller
 
 import (
+	"context"
 	"errors"
+	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/VileEnd/keyvault_certOperator/internal/domain"
 )
@@ -29,6 +32,27 @@ const (
 	// not be trusted to be complete.
 	ReasonPruneWithheld = "PruneWithheld"
 )
+
+// updateStatus writes a resource's status subresource, tolerating the two
+// failures that mean "this write no longer matters".
+//
+// A conflict means someone else changed the object, so the next reconcile
+// recomputes status from the current one -- retrying against a stale object
+// would only overwrite fresher data. A NotFound means the resource was deleted
+// while this pass was running.
+//
+// Shared by both controllers on purpose. They previously had one of these each,
+// tolerating a different one of the two errors, so which transient failure
+// turned into a requeue depended on which controller you were in.
+func updateStatus(ctx context.Context, c client.Client, obj client.Object) error {
+	if err := c.Status().Update(ctx, obj); err != nil {
+		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("updating status: %w", err)
+	}
+	return nil
+}
 
 func setCondition(conditions *[]metav1.Condition, conditionType, reason, message string,
 	status metav1.ConditionStatus, generation int64,

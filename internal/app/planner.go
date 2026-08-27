@@ -14,6 +14,9 @@ type PolicySpec struct {
 	Zones []string
 	// MaxCertificates caps the plan; zero means unlimited.
 	MaxCertificates int
+	// Existing names the certificates the policy has already generated, so the
+	// cap can overflow a new certificate rather than evict an issued one.
+	Existing []string
 	// Grouping selects how SANs are packed into certificates.
 	Grouping domain.Grouping
 	// IssueZoneWildcards plans "*.zone" for every zone regardless of discovery.
@@ -74,6 +77,7 @@ func (p *Planner) Plan(ctx context.Context, spec PolicySpec) (DesiredState, erro
 		Hosts:              hosts,
 		Zones:              spec.Zones,
 		MaxCertificates:    spec.MaxCertificates,
+		Existing:           spec.Existing,
 		Grouping:           spec.Grouping,
 		IssueZoneWildcards: spec.IssueZoneWildcards,
 	})

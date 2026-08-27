@@ -22,8 +22,11 @@ spec:
     - jsonPath: .spec.zones
       name: Zones
       type: string
-    - jsonPath: .status.discoveredHosts
+    - jsonPath: .status.requiredCertificateCount
       name: Certificates
+      type: integer
+    - jsonPath: .status.discoveredHosts
+      name: Hosts
       priority: 1
       type: integer
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
@@ -229,9 +232,15 @@ spec:
                     pattern: ^[a-zA-Z][a-zA-Z0-9-]{0,126}$
                     type: string
                   cloud:
-                    default: AzurePublicCloud
-                    description: Cloud selects the Azure environment when Name is
-                      used.
+                    description: |-
+                      Cloud selects the Azure environment when Name is used.
+
+                      Left unset it follows the operator's --azure-cloud, which is the cloud
+                      the operator's own identity lives in and is almost always the right
+                      answer. It is deliberately not defaulted by the API server: a default
+                      materialised into every stored object would silently override that flag,
+                      so a sovereign-cloud deployment would have to repeat the cloud on every
+                      resource to work at all.
                     enum:
                     - AzurePublicCloud
                     - AzureUSGovernmentCloud
@@ -259,6 +268,11 @@ spec:
                 description: |-
                   MaxCertificates caps how many certificates may be planned. The overflow is
                   reported in status rather than issued.
+
+                  At the cap, certificates that already exist keep their slot and the new
+                  one overflows. The alternative -- planning the first N by name -- means
+                  adding a zone that sorts early evicts an unrelated certificate, and under
+                  orphanPolicy: Prune, out of the plan means deleted.
                 format: int32
                 maximum: 100
                 minimum: 1
@@ -327,9 +341,20 @@ spec:
                 description: ApplicationGateway is the listener configuration to apply
                   out of band.
                 properties:
+                  listenerCount:
+                    description: |-
+                      ListenerCount is how many listeners the plan actually needs.
+
+                      Worth reading rather than counting the list above: Application Gateway
+                      allows 100 active listeners per gateway, hard, so a count above 100 does
+                      not merely mean this report was truncated -- it means the plan does not
+                      fit on one gateway.
+                    format: int32
+                    type: integer
                   listeners:
-                    description: Listeners is the set of listeners needed to serve
-                      every planned certificate.
+                    description: |-
+                      Listeners is the set of listeners needed to serve every planned
+                      certificate, truncated to 100. ListenerCount reports the true total.
                     items:
                       description: ListenerGuidance is a ready-to-apply Application
                         Gateway listener.
@@ -431,15 +456,25 @@ spec:
                   was computed from.
                 format: int64
                 type: integer
+              requiredCertificateCount:
+                description: RequiredCertificateCount is how many certificates the
+                  plan contains.
+                format: int32
+                type: integer
               requiredCertificates:
-                description: RequiredCertificates is the planned certificate set.
+                description: |-
+                  RequiredCertificates is the planned certificate set. It is bounded by
+                  spec.maxCertificates, which the API server caps at 100.
                 items:
                   description: PlannedCertificate is one certificate discovery decided
                     the cluster needs.
                   properties:
                     dnsNames:
-                      description: DNSNames are the subject alternative names it must
-                        carry.
+                      description: |-
+                        DNSNames are the subject alternative names it must carry, truncated to
+                        the first 100. The issued Certificate always carries the full set; only
+                        this report is bounded, because an unbounded status field would put every
+                        SAN of every certificate into etcd on every reconcile.
                       items:
                         type: string
                       maxItems: 100

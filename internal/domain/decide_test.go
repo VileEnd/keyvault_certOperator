@@ -156,3 +156,51 @@ func TestDecideWarnsOnExpiryRegression(t *testing.T) {
 		t.Error("expected a warning about the expiry regression")
 	}
 }
+
+func TestDecideReportsADisabledCertificate(t *testing.T) {
+	t.Parallel()
+	// The one state where "Key Vault holds this exact certificate" and "the
+	// listener is serving it" come apart. Every thumbprint matches, so without
+	// this the sync reports UpToDate while the site is down.
+	root := testutil.NewRootCA(t, "test root")
+	inter := root.Intermediate(t, "intermediate R10")
+	leaf := inter.Issue(t, testutil.LeafOptions{DNSNames: []string{"*.x.com", "x.com"}})
+	bundle, err := domain.ParseBundle(leaf.CertPEM(t), leaf.KeyPEM(t, testutil.PKCS8))
+	if err != nil {
+		t.Fatalf("ParseBundle: %v", err)
+	}
+
+	snap := domain.VaultSnapshot{
+		Exists:      true,
+		Thumbprint:  bundle.Thumbprint(),
+		ChainDigest: bundle.ChainDigest(),
+		Enabled:     false,
+		NotAfter:    bundle.NotAfter(),
+	}
+
+	decision, err := domain.Decide(bundle, snap, bundle.NotAfter().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	// Reported, not repaired: re-importing would mint a version per reconcile
+	// and undo a deliberate act on a security-sensitive object.
+	if decision.Action != domain.ActionNone {
+		t.Errorf("action = %q, want %q", decision.Action, domain.ActionNone)
+	}
+	if decision.WarningReason != domain.ReasonDisabledInVault {
+		t.Errorf("warningReason = %q, want %q", decision.WarningReason, domain.ReasonDisabledInVault)
+	}
+	if decision.Warning == "" {
+		t.Error("a disabled certificate produced no warning at all")
+	}
+
+	// And an enabled one must stay quiet, or the warning means nothing.
+	snap.Enabled = true
+	enabled, err := domain.Decide(bundle, snap, bundle.NotAfter().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if enabled.Warning != "" {
+		t.Errorf("an enabled certificate warned: %q", enabled.Warning)
+	}
+}

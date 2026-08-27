@@ -40,6 +40,34 @@ var vaultHostSuffixes = []string{
 	"vault.azure.cn", "vaultcore.azure.cn",
 }
 
+// ParseCloud validates a cloud name, treating empty as the public cloud.
+//
+// Resolving a bare vault name against the wrong cloud produces a URL that is
+// syntactically fine and can never work, so the name is checked once at startup
+// rather than turning into a DNS failure the sync controller classifies as
+// retryable and backs off against forever.
+func ParseCloud(value string) (Cloud, error) {
+	if strings.TrimSpace(value) == "" {
+		return CloudPublic, nil
+	}
+	cloud := Cloud(strings.TrimSpace(value))
+	if _, ok := vaultSuffixes[cloud]; !ok {
+		return "", fmt.Errorf("unknown Azure cloud %q; expected one of %s",
+			value, strings.Join(KnownClouds(), ", "))
+	}
+	return cloud, nil
+}
+
+// KnownClouds lists the accepted cloud names, sorted so messages are stable.
+func KnownClouds() []string {
+	out := make([]string, 0, len(vaultSuffixes))
+	for cloud := range vaultSuffixes {
+		out = append(out, string(cloud))
+	}
+	sort.Strings(out)
+	return out
+}
+
 // VaultURL resolves a vault name or an explicit URL into a base vault URL.
 //
 // Accepting a bare name keeps the common case terse while an explicit URL still

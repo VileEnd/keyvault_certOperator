@@ -93,7 +93,7 @@ if [[ "${E2E_CERT_MANAGER:-0}" == "1" ]]; then
   $KUBECTL wait --for=condition=Ready --timeout=180s -n cert-manager certificate/e2e-ca
 fi
 
-GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.6.1}"
+GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-$(make -s print-gateway-api-version)}"
 
 # Gateway API has to be installed before the operator starts: controller-runtime
 # cannot open an informer for a type the API server does not serve, so the

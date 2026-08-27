@@ -20,8 +20,10 @@ type SyncOutcome struct {
 	Action domain.Action
 	// Reason explains the action; see the domain.Reason* constants.
 	Reason string
-	// Warning is non-empty when something deserves attention but not failure.
-	Warning string
+	// Warning is non-empty when something deserves attention alongside the
+	// action, and WarningReason names which situation it is.
+	Warning       string
+	WarningReason string
 
 	// CertificateName is the Key Vault object name used, whether it came from
 	// the request or was derived from the certificate's SANs.
@@ -99,6 +101,7 @@ func (s *Syncer) Sync(ctx context.Context, req SyncRequest) (SyncOutcome, error)
 		CertificateName:  req.Vault.CertificateName,
 		Reason:           decision.Reason,
 		Warning:          decision.Warning,
+		WarningReason:    decision.WarningReason,
 		Thumbprint:       bundle.ThumbprintHex(),
 		ChainDigest:      bundle.ChainDigest(),
 		NotAfter:         bundle.NotAfter(),

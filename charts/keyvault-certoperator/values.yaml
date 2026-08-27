@@ -32,6 +32,14 @@ azure:
   #   allowedVaults: ["my-vault"]
   allowedVaults: []
 
+  # The Azure cloud this operator's identity lives in. It resolves every bare
+  # Key Vault name -- in allowedVaults above and in any resource that does not
+  # name a cloud of its own -- so a sovereign-cloud deployment sets it once here
+  # rather than repeating it on every resource.
+  #
+  # One of AzureChinaCloud, AzurePublicCloud, AzureUSGovernmentCloud.
+  cloud: AzurePublicCloud
+
 serviceAccount:
   create: true
   name: ""

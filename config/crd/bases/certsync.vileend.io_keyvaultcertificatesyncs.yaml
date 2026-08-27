@@ -78,9 +78,15 @@ spec:
                     pattern: ^[a-zA-Z][a-zA-Z0-9-]{0,126}$
                     type: string
                   cloud:
-                    default: AzurePublicCloud
-                    description: Cloud selects the Azure environment when Name is
-                      used.
+                    description: |-
+                      Cloud selects the Azure environment when Name is used.
+
+                      Left unset it follows the operator's --azure-cloud, which is the cloud
+                      the operator's own identity lives in and is almost always the right
+                      answer. It is deliberately not defaulted by the API server: a default
+                      materialised into every stored object would silently override that flag,
+                      so a sovereign-cloud deployment would have to repeat the cloud on every
+                      resource to work at all.
                     enum:
                     - AzurePublicCloud
                     - AzureUSGovernmentCloud
