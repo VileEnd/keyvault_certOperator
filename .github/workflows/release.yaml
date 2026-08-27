@@ -1,10 +1,11 @@
 name: Release
 
-# Publishing is what makes a tag mean anything here. The chart defaults to
-# ghcr.io/vileend/keyvault-certoperator with the tag derived from appVersion, so
-# without this workflow `helm install` from a clean checkout produces an
-# ImagePullBackOff -- which is why the CI deploy job overrides the image and
-# sets pullPolicy=Never.
+# Publishing is what makes a tag mean anything here. Without it the chart points
+# at an image nobody ever pushed -- `helm install` from a clean checkout gives an
+# ImagePullBackOff, which is why the CI deploy job overrides the image and sets
+# pullPolicy=Never -- and the chart itself can only be installed by cloning the
+# repository. This publishes all three: the image, the chart, and a release
+# carrying the single-file kustomize installer.
 on:
   push:
     tags: ["v*"]
@@ -15,17 +16,20 @@ on:
         required: true
 
 permissions:
-  contents: read
+  # contents: write is for creating the GitHub Release and attaching the
+  # single-file kustomize installer to it.
+  contents: write
   packages: write
 
 env:
   GO_VERSION: "1.26"
   REGISTRY: ghcr.io
   IMAGE: ghcr.io/${{ github.repository_owner }}/keyvault-certoperator
+  CHART_REPO: oci://ghcr.io/${{ github.repository_owner }}/charts
 
 jobs:
-  image:
-    name: Publish the container image
+  publish:
+    name: Publish the image, the chart and the release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,17 +46,34 @@ jobs:
           echo "tag=${ref}" >> "$GITHUB_OUTPUT"
           echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
 
-      # A tag whose version disagrees with the chart would ship an image the
-      # chart cannot find, since the chart's image tag defaults to appVersion.
+      # Both fields matter, for different reasons. appVersion is where the chart
+      # resolves its image tag from, so a mismatch ships an image the chart
+      # never pulls. version is what the chart is *published as*, so a mismatch
+      # puts chart 0.2.0 behind tag v0.1.0.
       - name: Refuse to publish if the chart disagrees
         run: |
-          chart=$(grep '^appVersion:' charts/keyvault-certoperator/Chart.yaml | tr -d '"' | awk '{print $2}')
-          if [ "$chart" != "${{ steps.version.outputs.version }}" ]; then
-            echo "tag ${{ steps.version.outputs.tag }} implies appVersion ${{ steps.version.outputs.version }},"
-            echo "but Chart.yaml declares ${chart}. The chart resolves its image tag from appVersion,"
-            echo "so publishing this would produce an image the chart never pulls."
-            exit 1
-          fi
+          want='${{ steps.version.outputs.version }}'
+          for field in version appVersion; do
+            have=$(grep "^${field}:" charts/keyvault-certoperator/Chart.yaml | tr -d '"' | awk '{print $2}')
+            if [ "$have" != "$want" ]; then
+              echo "tag ${{ steps.version.outputs.tag }} implies ${field} ${want},"
+              echo "but Chart.yaml declares ${have}."
+              exit 1
+            fi
+          done
+
+      - uses: ./.github/actions/go-tools
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # A tag can be placed on any commit, and a published image cannot be
+      # withdrawn -- the tag is permanent in the registry. So the tests run here
+      # rather than trusting that whatever was tagged happened to be green.
+      - name: Test before publishing anything
+        run: |
+          go build ./...
+          go vet ./...
+          make test-unit
 
       - name: Log in to the registry
         run: |
@@ -88,3 +109,75 @@ jobs:
       - name: Verify the published image can be pulled
         run: |
           docker buildx imagetools inspect "${{ env.IMAGE }}:${{ steps.version.outputs.tag }}"
+
+      # Publishing the chart is what makes the operator installable without
+      # cloning the repository. OCI rather than a gh-pages index: same registry
+      # and same credentials as the image, with no extra branch to keep in sync.
+      - name: Publish the chart
+        run: |
+          make helm
+          export PATH="$PWD/bin:$PATH"
+          helm registry login ${{ env.REGISTRY }} \
+            -u ${{ github.actor }} --password-stdin <<< "${{ secrets.GITHUB_TOKEN }}"
+          helm package charts/keyvault-certoperator --destination dist/
+          helm push "dist/keyvault-certoperator-${{ steps.version.outputs.version }}.tgz" \
+            "${{ env.CHART_REPO }}"
+
+      # Same reasoning as the image inspect above: a push that returned zero is
+      # not proof that anyone can install what it pushed.
+      - name: Verify the published chart can be installed from
+        run: |
+          export PATH="$PWD/bin:$PATH"
+          helm show chart "${{ env.CHART_REPO }}/keyvault-certoperator" \
+            --version "${{ steps.version.outputs.version }}"
+          helm template release "${{ env.CHART_REPO }}/keyvault-certoperator" \
+            --version "${{ steps.version.outputs.version }}" \
+            --set azure.clientId=00000000-0000-0000-0000-000000000000 > /dev/null
+
+      # Checked before the release is created rather than when it is needed, so
+      # a missing binary fails loudly instead of after the artifacts are already
+      # published and the tag is spent.
+      - name: Check the GitHub CLI is available
+        run: gh --version
+
+      - name: Render the single-file installer
+        run: make build-installer IMG="${{ env.IMAGE }}:${{ steps.version.outputs.tag }}"
+
+      # Pre-release on purpose. The operator has never run against a real Key
+      # Vault -- the end-to-end suite proves the wire protocol against a
+      # faithful fake, not Azure's acceptance of the PKCS#12 archive. The tag
+      # promises a reproducible artifact, not a validated one.
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > /tmp/notes.md <<'NOTES'
+          ## Install
+
+          ```bash
+          helm upgrade --install keyvault-certoperator \
+            oci://ghcr.io/${{ github.repository_owner }}/charts/keyvault-certoperator \
+            --version ${{ steps.version.outputs.version }} \
+            --namespace keyvault-certoperator-system --create-namespace \
+            --set azure.clientId=<managed-identity-client-id> \
+            --set serviceAccount.name=keyvault-certoperator
+          ```
+
+          Or with kustomize: `kubectl apply -f` the `install.yaml` attached below.
+
+          ## What this tag promises, and what it does not
+
+          It promises a reproducible artifact: a multi-arch image, a chart
+          pinned to it, and a Terraform module you can reference by ref.
+
+          It does **not** promise a stable API, and it does not promise that the
+          Azure path works. The API is `v1alpha1`. The operator has never talked
+          to a real Key Vault -- the end-to-end suite proves the wire protocol
+          against a faithful fake, and the Terraform module is schema-validated
+          but has never been applied. That is why this is marked a pre-release.
+          NOTES
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --notes-file /tmp/notes.md \
+            --prerelease \
+            dist/install.yaml

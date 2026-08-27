@@ -80,7 +80,7 @@ test: manifests generate fmt vet setup-envtest ## Run all tests, including envte
 
 .PHONY: test-unit
 test-unit: ## Run only the tests that need neither a cluster nor Azure.
-	go test ./internal/domain/... ./internal/app/... ./internal/infra/...
+	go test ./cmd/... ./internal/domain/... ./internal/app/... ./internal/infra/...
 
 .PHONY: check-manifests
 check-manifests: manifests generate ## Fail if generated files are out of date.
@@ -212,11 +212,11 @@ helm-manifests: helm-crds helm-rbac ## Sync everything generated into the chart.
 
 .PHONY: helm-crds
 helm-crds: manifests ## Sync the generated CRDs into the chart.
-	cp config/crd/bases/*.yaml charts/keyvault-certoperator/crds/
+	go run ./hack/helmgen -crds -o charts/keyvault-certoperator/templates/crds.yaml
 
 .PHONY: helm-rbac
 helm-rbac: manifests ## Sync the generated RBAC rules into the chart.
-	go run ./hack/helmrbac -o charts/keyvault-certoperator/templates/_rbac-rules.tpl
+	go run ./hack/helmgen -o charts/keyvault-certoperator/templates/_rbac-rules.tpl
 
 .PHONY: check-helm-manifests
 check-helm-manifests: helm-manifests ## Fail if anything generated in the chart is stale.
@@ -233,7 +233,7 @@ helm-lint: helm ## Lint the chart, render it, and check what it actually grants.
 		> $(LOCALBIN)/chart-rendered.yaml
 	# The staleness gate cannot see a deleted include, so what the chart really
 	# grants is compared against config/rbac rather than against the template.
-	go run ./hack/helmrbac -verify $(LOCALBIN)/chart-rendered.yaml
+	go run ./hack/helmgen -verify $(LOCALBIN)/chart-rendered.yaml
 
 ##@ End-to-end
 

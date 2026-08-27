@@ -1,3 +1,17 @@
+# The CustomResourceDefinitions ship in templates/ rather than crds/, so that
+# "helm upgrade" actually updates them -- Helm installs a crds/ directory once
+# and never touches it again, with no flag to change that.
+crds:
+  # Install the CRDs with the chart. Turn this off where a platform team or
+  # GitOps controller owns cluster-scoped resources; the operator still needs
+  # them to exist.
+  enabled: true
+  # Keep the CRDs when the release is uninstalled. Deleting a CRD deletes every
+  # custom resource of that kind, so "helm uninstall" would otherwise take every
+  # WildcardCertificatePolicy and KeyVaultCertificateSync with it. Leave this on
+  # unless you are certain you want that.
+  keep: true
+
 image:
   repository: ghcr.io/vileend/keyvault-certoperator
   tag: ""            # defaults to the chart's appVersion

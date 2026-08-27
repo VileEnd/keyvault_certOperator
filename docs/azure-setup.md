@@ -53,7 +53,10 @@ resource "helm_release" "certoperator" {
   name             = "keyvault-certoperator"
   namespace        = module.certoperator_identity.namespace
   create_namespace = true
-  chart            = "./charts/keyvault-certoperator"
+
+  repository = "oci://ghcr.io/vileend/charts"
+  chart      = "keyvault-certoperator"
+  version    = "0.1.0"
 
   dynamic "set" {
     for_each = module.certoperator_identity.helm_values

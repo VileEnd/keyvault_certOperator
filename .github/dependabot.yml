@@ -1,0 +1,55 @@
+# govulncheck (in CI) says when a dependency is exploitable. Nothing opened the
+# pull request that bumps it, which is the other half of that story.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # The k8s.io and sigs.k8s.io modules move in lockstep and cannot be
+      # upgraded independently -- controller-runtime pins its apimachinery.
+      # Ungrouped, this opens a dozen pull requests a week, none of which can
+      # merge on their own.
+      kubernetes:
+        patterns:
+          - k8s.io/*
+          - sigs.k8s.io/*
+      azure:
+        patterns:
+          - github.com/Azure/*
+          - github.com/AzureAD/*
+      # Everything else, patch and minor only. A major bump is a decision, not
+      # a chore, so those still arrive as their own pull request.
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # The distroless base is pinned by digest in the Dockerfile, so nothing else
+  # would ever move it.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: terraform
+    directory: /terraform
+    schedule:
+      interval: weekly
+    groups:
+      providers:
+        patterns:
+          - "*"

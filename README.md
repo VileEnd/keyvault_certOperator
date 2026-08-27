@@ -110,23 +110,45 @@ default.
 ### 2. Install
 
 ```bash
-helm upgrade --install keyvault-certoperator ./charts/keyvault-certoperator \
+helm upgrade --install keyvault-certoperator \
+  oci://ghcr.io/vileend/charts/keyvault-certoperator --version 0.1.0 \
   --namespace keyvault-certoperator-system --create-namespace \
   --set azure.clientId=<managed-identity-client-id> \
   --set serviceAccount.name=keyvault-certoperator
 ```
 
-Or with kustomize: `make deploy IMG=<your-image>`.
+Or with kustomize, in one URL:
 
-> **Upgrading does not update the CRDs.** Helm installs everything in a chart's
-> `crds/` directory once and never touches it again — by design, and with no
-> flag to change it. So `helm upgrade` ships a new operator against the old
-> schema, which is how a field whose default was deliberately *removed* keeps
-> being defaulted. Apply them yourself alongside the upgrade:
+```bash
+kubectl apply -f https://github.com/VileEnd/keyvault_certOperator/releases/download/v0.1.0/install.yaml
+```
+
+From a clone, `./charts/keyvault-certoperator` and `make deploy IMG=<your-image>`
+both still work; that is the development path.
+
+> **Upgrading from a clone predating v0.1.0.** The CRDs used to sit in the
+> chart's `crds/` directory, which Helm installs once and never updates. They
+> are now ordinary templates, so `helm upgrade` keeps them current — but Helm
+> will not adopt objects it did not create, and refuses the upgrade by name:
+>
+> ```
+> invalid ownership metadata; label validation error: missing key
+> "app.kubernetes.io/managed-by": must be set to "Helm"
+> ```
+>
+> Hand them over once, and it proceeds:
 >
 > ```bash
-> kubectl apply -f charts/keyvault-certoperator/crds/
+> for crd in keyvaultcertificatesyncs wildcardcertificatepolicies; do
+>   kubectl label    crd $crd.certsync.vileend.io app.kubernetes.io/managed-by=Helm --overwrite
+>   kubectl annotate crd $crd.certsync.vileend.io \
+>     meta.helm.sh/release-name=keyvault-certoperator \
+>     meta.helm.sh/release-namespace=keyvault-certoperator-system --overwrite
+> done
 > ```
+>
+> `helm uninstall` leaves the CRDs in place (`crds.keep`, on by default), since
+> deleting a CRD deletes every custom resource of that kind with it.
 
 > **Pin the ServiceAccount name.** The federated credential matches
 > `system:serviceaccount:<ns>:<name>` as a literal string, and the two install
