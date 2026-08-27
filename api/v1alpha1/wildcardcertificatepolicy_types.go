@@ -58,16 +58,24 @@ type IssuerReference struct {
 // DiscoverySpec selects where hostnames are discovered from.
 type DiscoverySpec struct {
 	// Ingress enables discovery from networking.k8s.io Ingress resources.
+	//
+	// Unset means "use this source when it is available", which is the default
+	// behaviour. It is deliberately left unset rather than defaulted to true:
+	// structural defaulting would materialise the value into every stored
+	// object, erasing the difference between a source the user required and one
+	// they never mentioned.
 	// +optional
-	// +kubebuilder:default=true
 	Ingress *bool `json:"ingress,omitempty"`
 
 	// HTTPRoutes enables discovery from Gateway API HTTPRoute resources.
 	//
 	// The watch can only be established if the Gateway API CRDs are present when
 	// the operator starts, so installing Gateway API later requires a restart.
+	//
+	// Unset means "use it when available". Setting it explicitly to true states
+	// a requirement: pruning is then withheld if the CRDs were absent at
+	// startup, because the discovered set would be incomplete.
 	// +optional
-	// +kubebuilder:default=true
 	HTTPRoutes *bool `json:"httpRoutes,omitempty"`
 
 	// Gateways enables discovery from the hostnames declared on Gateway API
@@ -82,8 +90,11 @@ type DiscoverySpec struct {
 	// HTTP because TLS is already terminated upstream at Application Gateway,
 	// which is exactly the topology this operator serves; the hostname is still
 	// a hostname the cluster routes.
+	//
+	// Unset means "use it when available". Setting it explicitly to true states
+	// a requirement: pruning is then withheld if the CRDs were absent at
+	// startup, because the discovered set would be incomplete.
 	// +optional
-	// +kubebuilder:default=true
 	Gateways *bool `json:"gateways,omitempty"`
 
 	// NamespaceSelector narrows discovery to matching namespaces. Empty means
