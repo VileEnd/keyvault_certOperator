@@ -3,7 +3,7 @@ module github.com/VileEnd/keyvault_certOperator
 go 1.26.0
 
 require (
-	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.22.0
+	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.0
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.14.0
 	github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azcertificates v1.5.0
 	github.com/cert-manager/cert-manager v1.21.1
@@ -14,6 +14,7 @@ require (
 	k8s.io/client-go v0.36.2
 	sigs.k8s.io/controller-runtime v0.24.1
 	sigs.k8s.io/gateway-api v1.6.1
+	sigs.k8s.io/yaml v1.6.0
 	software.sslmate.com/src/go-pkcs12 v0.7.3
 )
 
@@ -108,5 +109,4 @@ require (
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.4.0 // indirect
-	sigs.k8s.io/yaml v1.6.0 // indirect
 )
