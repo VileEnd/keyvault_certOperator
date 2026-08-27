@@ -121,10 +121,26 @@ func run() error {
 		schema.GroupKind{Group: gatewayv1.GroupName, Kind: "HTTPRoute"}, gatewayv1.GroupVersion.Version)
 	if httpRoutes {
 		watches = append(watches, &gatewayv1.HTTPRoute{})
-		setup.Info("Gateway API detected; HTTPRoute hostnames will be discovered")
-	} else {
+	}
+	// Gateways are probed separately from HTTPRoutes. They are normally
+	// installed together, but the listener hostnames are the only source that
+	// sees a route which inherits its hostname instead of stating one, so
+	// losing them silently would be the difference between discovering a
+	// wildcard and discovering nothing.
+	gateways := crdInstalled(mgr.GetRESTMapper(),
+		schema.GroupKind{Group: gatewayv1.GroupName, Kind: "Gateway"}, gatewayv1.GroupVersion.Version)
+	if gateways {
+		watches = append(watches, &gatewayv1.Gateway{})
+	}
+	switch {
+	case httpRoutes && gateways:
+		setup.Info("Gateway API detected; discovering Gateway listener and HTTPRoute hostnames")
+	case httpRoutes || gateways:
+		setup.Info("Gateway API only partially present; discovery may be incomplete",
+			"httpRoutes", httpRoutes, "gateways", gateways)
+	default:
 		setup.Info("Gateway API not detected; discovering hostnames from Ingress only. " +
-			"Restart the operator after installing Gateway API to pick up HTTPRoutes.")
+			"Restart the operator after installing Gateway API to pick up Gateways and HTTPRoutes.")
 	}
 
 	if err := (&controller.WildcardCertificatePolicyReconciler{
@@ -134,6 +150,7 @@ func run() error {
 		Certificates:        kube.NewCertificateWriter(mgr.GetClient(), mgr.GetRESTMapper()),
 		Clock:               clock,
 		HTTPRoutesAvailable: httpRoutes,
+		GatewaysAvailable:   gateways,
 	}).SetupWithManager(mgr, watches); err != nil {
 		return fmt.Errorf("setting up the wildcard policy controller: %w", err)
 	}

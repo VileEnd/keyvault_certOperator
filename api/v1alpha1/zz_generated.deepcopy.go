@@ -67,6 +67,11 @@ func (in *DiscoverySpec) DeepCopyInto(out *DiscoverySpec) {
 		*out = new(bool)
 		**out = **in
 	}
+	if in.Gateways != nil {
+		in, out := &in.Gateways, &out.Gateways
+		*out = new(bool)
+		**out = **in
+	}
 	if in.NamespaceSelector != nil {
 		in, out := &in.NamespaceSelector, &out.NamespaceSelector
 		*out = new(v1.LabelSelector)

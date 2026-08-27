@@ -1,3 +1,5 @@
 resources:
+# The Gateway API variant is deliberately absent: it is an *alternative* to the
+# policy below, not an addition, and carries the same name.
 - certsync_v1alpha1_wildcardcertificatepolicy.yaml
 - certsync_v1alpha1_keyvaultcertificatesync.yaml

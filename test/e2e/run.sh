@@ -93,6 +93,17 @@ if [[ "${E2E_CERT_MANAGER:-0}" == "1" ]]; then
   $KUBECTL wait --for=condition=Ready --timeout=180s -n cert-manager certificate/e2e-ca
 fi
 
+GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.6.1}"
+
+# Gateway API has to be installed before the operator starts: controller-runtime
+# cannot open an informer for a type the API server does not serve, so the
+# Gateway and HTTPRoute watches are decided once at startup.
+echo "==> Installing Gateway API ${GATEWAY_API_VERSION} (standard channel)"
+$KUBECTL apply -f \
+  "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml" >/dev/null
+$KUBECTL wait --for=condition=Established --timeout=120s \
+  crd/gateways.gateway.networking.k8s.io crd/httproutes.gateway.networking.k8s.io >/dev/null
+
 echo "==> Installing CRDs"
 $KUBECTL apply -f config/crd/bases/ >/dev/null
 # The operator creates cert-manager Certificates. Only the CRD is needed; the
