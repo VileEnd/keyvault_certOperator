@@ -4,41 +4,20 @@ metadata:
   name: {{ include "keyvault-certoperator.fullname" . }}
   labels:
     {{- include "keyvault-certoperator.labels" . | nindent 4 }}
+# The rules come from templates/_rbac-rules.tpl, which "make helm-rbac"
+# generates from the +kubebuilder:rbac markers. They are not written here,
+# because a hand-maintained second copy is what once left the chart without
+# permission to list Gateways while the operator was watching them.
+#
+# What the markers grant, in short: Secrets are read-only -- the operator never
+# creates, updates or deletes one, and its cache is further restricted to
+# Secrets carrying certsync.vileend.io/managed=true, so unrelated private keys
+# never enter memory. Only cert-manager Certificates and this operator's own
+# resources are writable.
 rules:
-# Secrets are read-only. The operator never creates, updates or deletes one, and
-# its cache is further restricted to Secrets carrying
-# certsync.vileend.io/managed=true, so unrelated private keys never enter memory.
-- apiGroups: [""]
-  resources: ["secrets", "namespaces"]
-  verbs: ["get", "list", "watch"]
-- apiGroups: ["networking.k8s.io"]
-  resources: ["ingresses"]
-  verbs: ["get", "list", "watch"]
-- apiGroups: ["gateway.networking.k8s.io"]
-  resources: ["httproutes"]
-  verbs: ["get", "list", "watch"]
-- apiGroups: ["cert-manager.io"]
-  resources: ["certificates"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-- apiGroups: ["certsync.vileend.io"]
-  resources: ["keyvaultcertificatesyncs", "wildcardcertificatepolicies"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-- apiGroups: ["certsync.vileend.io"]
-  resources: ["keyvaultcertificatesyncs/status", "wildcardcertificatepolicies/status"]
-  verbs: ["get", "update", "patch"]
-- apiGroups: ["certsync.vileend.io"]
-  resources: ["keyvaultcertificatesyncs/finalizers", "wildcardcertificatepolicies/finalizers"]
-  verbs: ["update"]
-- apiGroups: ["events.k8s.io"]
-  resources: ["events"]
-  verbs: ["create", "patch"]
+{{- include "keyvault-certoperator.managerRules" . | nindent 0 }}
 {{- if .Values.metrics.enabled }}
-- apiGroups: ["authentication.k8s.io"]
-  resources: ["tokenreviews"]
-  verbs: ["create"]
-- apiGroups: ["authorization.k8s.io"]
-  resources: ["subjectaccessreviews"]
-  verbs: ["create"]
+{{- include "keyvault-certoperator.metricsAuthRules" . | nindent 0 }}
 {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -65,12 +44,7 @@ metadata:
   labels:
     {{- include "keyvault-certoperator.labels" . | nindent 4 }}
 rules:
-- apiGroups: ["coordination.k8s.io"]
-  resources: ["leases"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-- apiGroups: ["events.k8s.io"]
-  resources: ["events"]
-  verbs: ["create", "patch"]
+{{- include "keyvault-certoperator.leaderElectionRules" . | nindent 0 }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

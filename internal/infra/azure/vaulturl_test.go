@@ -123,3 +123,61 @@ func TestVaultNameRulesMatchAzure(t *testing.T) {
 		}
 	}
 }
+
+func TestParseCloud(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		value string
+		want  azure.Cloud
+		fails bool
+	}{
+		{name: "empty means the public cloud", value: "", want: azure.CloudPublic},
+		{name: "government", value: "AzureUSGovernmentCloud", want: azure.CloudUSGovernment},
+		{name: "china", value: "AzureChinaCloud", want: azure.CloudChina},
+		{name: "surrounding space is tolerated", value: " AzureChinaCloud ", want: azure.CloudChina},
+		// Rejected at startup rather than silently resolving bare names against
+		// a suffix that does not exist.
+		{name: "a typo is rejected", value: "AzurePublic", fails: true},
+		{name: "an SDK-style name is rejected", value: "AzureCloud", fails: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := azure.ParseCloud(tc.value)
+			if tc.fails {
+				if err == nil {
+					t.Fatalf("ParseCloud(%q) = %q, want an error", tc.value, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseCloud(%q): %v", tc.value, err)
+			}
+			if got != tc.want {
+				t.Errorf("ParseCloud(%q) = %q, want %q", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestVaultURLResolvesBareNamesPerCloud(t *testing.T) {
+	t.Parallel()
+	// The suffix is what an allowlist entry is compared on, so resolving a bare
+	// name against the wrong cloud produces an entry no resource can ever match.
+	want := map[azure.Cloud]string{
+		azure.CloudPublic:       "https://kvname.vault.azure.net",
+		azure.CloudUSGovernment: "https://kvname.vault.usgovcloudapi.net",
+		azure.CloudChina:        "https://kvname.vault.azure.cn",
+	}
+	for cloud, expected := range want {
+		got, err := azure.VaultURL("kvname", cloud)
+		if err != nil {
+			t.Fatalf("VaultURL(kvname, %q): %v", cloud, err)
+		}
+		if got != expected {
+			t.Errorf("VaultURL(kvname, %q) = %q, want %q", cloud, got, expected)
+		}
+	}
+}

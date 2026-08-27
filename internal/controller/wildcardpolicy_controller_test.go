@@ -515,11 +515,13 @@ func TestPolicyPrunesWhenDiscoveryOmitsTheUnavailableSource(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(ctx, policy) })
 
-	// Guards against the API server quietly reintroducing the default.
+	// Guards against the API server quietly reintroducing the default. Read
+	// through eventually because k8sClient is the manager's cached client, so a
+	// Get straight after a Create races the informer.
 	var stored v1alpha1.WildcardCertificatePolicy
-	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), &stored); err != nil {
-		t.Fatalf("reading back the policy: %v", err)
-	}
+	eventually(t, 30*time.Second, func() error {
+		return k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), &stored)
+	})
 	if stored.Spec.Discovery.Gateways != nil {
 		t.Fatalf("spec.discovery.gateways was materialised as %v; it must stay unset so the "+
 			"withholding guard can tell a requirement from a default", *stored.Spec.Discovery.Gateways)

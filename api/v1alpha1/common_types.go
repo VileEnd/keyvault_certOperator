@@ -72,9 +72,15 @@ type KeyVaultSpec struct {
 	VaultURL string `json:"vaultURL,omitempty"`
 
 	// Cloud selects the Azure environment when Name is used.
+	//
+	// Left unset it follows the operator's --azure-cloud, which is the cloud
+	// the operator's own identity lives in and is almost always the right
+	// answer. It is deliberately not defaulted by the API server: a default
+	// materialised into every stored object would silently override that flag,
+	// so a sovereign-cloud deployment would have to repeat the cloud on every
+	// resource to work at all.
 	// +optional
 	// +kubebuilder:validation:Enum=AzurePublicCloud;AzureUSGovernmentCloud;AzureChinaCloud
-	// +kubebuilder:default=AzurePublicCloud
 	Cloud string `json:"cloud,omitempty"`
 
 	// CertificateName is the Key Vault object name. Defaults to a value derived

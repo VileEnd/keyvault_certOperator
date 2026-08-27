@@ -13,6 +13,14 @@ const (
 	// GroupingPerZone issues one SAN certificate per zone. This is the default
 	// and keeps the Application Gateway listener, site and certificate counts as
 	// low as possible -- all three share a hard, non-adjustable ceiling of 100.
+	//
+	// The certificate is named after a SAN it actually carries, which is
+	// "wildcard-<zone>" whenever the zone's own wildcard is covered. Where it
+	// is not -- a cluster routing only "a.b.x.com" needs "*.b.x.com", not
+	// "*.x.com" -- the name follows the SAN instead, because a listener
+	// configured against "wildcard-x-com" would otherwise be handed a
+	// certificate that matches nothing it serves. Set issueZoneWildcards to
+	// pin the name, since the zone wildcard is then always covered.
 	GroupingPerZone CertificateGrouping = "PerZone"
 	// GroupingPerWildcard issues one certificate per distinct wildcard.
 	GroupingPerWildcard CertificateGrouping = "PerWildcard"
@@ -136,6 +144,11 @@ type WildcardCertificatePolicySpec struct {
 
 	// MaxCertificates caps how many certificates may be planned. The overflow is
 	// reported in status rather than issued.
+	//
+	// At the cap, certificates that already exist keep their slot and the new
+	// one overflows. The alternative -- planning the first N by name -- means
+	// adding a zone that sorts early evicts an unrelated certificate, and under
+	// orphanPolicy: Prune, out of the plan means deleted.
 	// +optional
 	// +kubebuilder:default=10
 	// +kubebuilder:validation:Minimum=1
@@ -193,7 +206,10 @@ type PlannedCertificate struct {
 	Name string `json:"name"`
 	// Zone is the allowlisted zone it was planned under.
 	Zone string `json:"zone"`
-	// DNSNames are the subject alternative names it must carry.
+	// DNSNames are the subject alternative names it must carry, truncated to
+	// the first 100. The issued Certificate always carries the full set; only
+	// this report is bounded, because an unbounded status field would put every
+	// SAN of every certificate into etcd on every reconcile.
 	// +kubebuilder:validation:MaxItems=100
 	DNSNames []string `json:"dnsNames"`
 	// SecretName is the Secret cert-manager writes.
@@ -226,10 +242,20 @@ type ListenerGuidance struct {
 // consume. The operator holds no ARM permissions and never writes gateway
 // configuration itself.
 type ApplicationGatewayGuidance struct {
-	// Listeners is the set of listeners needed to serve every planned certificate.
+	// Listeners is the set of listeners needed to serve every planned
+	// certificate, truncated to 100. ListenerCount reports the true total.
 	// +optional
 	// +kubebuilder:validation:MaxItems=100
 	Listeners []ListenerGuidance `json:"listeners,omitempty"`
+
+	// ListenerCount is how many listeners the plan actually needs.
+	//
+	// Worth reading rather than counting the list above: Application Gateway
+	// allows 100 active listeners per gateway, hard, so a count above 100 does
+	// not merely mean this report was truncated -- it means the plan does not
+	// fit on one gateway.
+	// +optional
+	ListenerCount int32 `json:"listenerCount,omitempty"`
 }
 
 // WildcardCertificatePolicyStatus reports the observed state of discovery.
@@ -250,10 +276,15 @@ type WildcardCertificatePolicyStatus struct {
 	// +optional
 	DiscoveredHosts int32 `json:"discoveredHosts,omitempty"`
 
-	// RequiredCertificates is the planned certificate set.
+	// RequiredCertificates is the planned certificate set. It is bounded by
+	// spec.maxCertificates, which the API server caps at 100.
 	// +optional
 	// +kubebuilder:validation:MaxItems=100
 	RequiredCertificates []PlannedCertificate `json:"requiredCertificates,omitempty"`
+
+	// RequiredCertificateCount is how many certificates the plan contains.
+	// +optional
+	RequiredCertificateCount int32 `json:"requiredCertificateCount,omitempty"`
 
 	// SkippedHosts lists hostnames that were not covered, with reasons. It is
 	// truncated to a bounded sample; SkippedHostCount reports the true total.
@@ -278,7 +309,8 @@ type WildcardCertificatePolicyStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,shortName=wcp,categories=certsync
 // +kubebuilder:printcolumn:name="Zones",type=string,JSONPath=`.spec.zones`
-// +kubebuilder:printcolumn:name="Certificates",type=integer,JSONPath=`.status.discoveredHosts`,priority=1
+// +kubebuilder:printcolumn:name="Certificates",type=integer,JSONPath=`.status.requiredCertificateCount`
+// +kubebuilder:printcolumn:name="Hosts",type=integer,JSONPath=`.status.discoveredHosts`,priority=1
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 

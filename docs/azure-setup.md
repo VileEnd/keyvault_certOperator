@@ -169,6 +169,27 @@ so `my-vault` and `https://my-vault.vault.azure.net` both work.
 Empty (the default) permits any vault the identity has rights on, which is the
 behaviour that existed before this setting.
 
+### Sovereign clouds
+
+A bare vault name is resolved against a DNS suffix, and the suffix differs per
+cloud: `vault.azure.net`, `vault.usgovcloudapi.net`, `vault.azure.cn`. Set the
+cloud once on the operator rather than on every resource:
+
+```yaml
+azure:
+  cloud: AzureUSGovernmentCloud
+```
+
+It applies to `allowedVaults` above and to any resource that does not set
+`spec.keyVault.cloud` of its own. Getting it wrong is not a soft failure: the
+allowlist entry resolves to a host no resource can ever match, and
+`ErrVaultNotAllowed` is deliberately not retryable, so every certificate fails
+permanently with `ConfigInvalid`.
+
+A resource may still override it — `spec.keyVault.cloud` wins where it is set —
+and `spec.keyVault.vaultURL` bypasses the question entirely, which is what a
+private endpoint needs anyway.
+
 ### Networking
 
 If the vault has network ACLs, add the gateway's subnet **explicitly** — with
@@ -291,6 +312,25 @@ and cert-manager has no knowledge of this operator.
 The vault is outside `azure.allowedVaults`. Either the resource names the wrong
 vault, or the allowlist is missing one the identity legitimately holds a role
 on. The condition message names both the vault requested and the permitted set.
+
+### Synced is True but Ready is False, reason DisabledInVault
+
+The certificate in Key Vault is the right one — every thumbprint matches — but
+the version is **disabled**, and Application Gateway cannot read a disabled
+version. This is the one state where "the vault holds it" and "the listener is
+serving it" come apart, so it is reported rather than rolled up into Ready.
+
+The operator does not re-enable it. Importing would mint a new enabled version,
+which quietly undoes a deliberate act on a security-sensitive object — and if
+whatever disabled it does so again, that repeats once per reconcile against a
+vault whose backup operation breaks past 500 versions.
+
+Re-enable it in Azure, or delete the certificate to have the operator import a
+fresh one:
+
+```console
+$ az keyvault certificate set-attributes --vault-name my-vault -n wildcard-x-com --enabled true
+```
 
 ### Imports fail with 403 and the role assignment looks correct
 

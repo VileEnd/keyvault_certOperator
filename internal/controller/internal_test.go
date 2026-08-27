@@ -3,14 +3,18 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/VileEnd/keyvault_certOperator/api/v1alpha1"
+	"github.com/VileEnd/keyvault_certOperator/internal/app"
 	"github.com/VileEnd/keyvault_certOperator/internal/domain"
 	"github.com/VileEnd/keyvault_certOperator/internal/infra/pkcs12"
 )
@@ -201,4 +205,99 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+func TestRecordPlanStaysWithinWhatTheCRDAccepts(t *testing.T) {
+	t.Parallel()
+	// The API server rejects a status that exceeds the MaxItems on these
+	// fields, and a rejected status update is not cosmetic: the policy reports
+	// nothing at all, on every pass, until the plan shrinks. Verified against a
+	// real API server -- 101 listeners and 101 SANs are both refused.
+	const zones = 60
+	state := app.DesiredState{DiscoveredHosts: make([]string, 500)}
+	for i := range zones {
+		// Six SANs is two listeners each, so this alone is past the 100 the
+		// field allows -- and past what one gateway can serve.
+		sans := make([]string, 6)
+		for j := range sans {
+			sans[j] = fmt.Sprintf("*.s%d.z%d.com", j, i)
+		}
+		state.Certificates = append(state.Certificates, app.DesiredCertificate{
+			CertificateRequest: domain.CertificateRequest{
+				Name:     fmt.Sprintf("wildcard-z%d-com", i),
+				Zone:     fmt.Sprintf("z%d.com", i),
+				DNSNames: sans,
+			},
+			SecretName:       "tls",
+			SecretIdentifier: "https://v.vault.azure.net/secrets/c",
+			Listeners:        domain.SplitListenerHostnames(sans),
+		})
+	}
+	// One certificate carrying more SANs than the report can hold, with the
+	// listeners that actually follow from them.
+	oversized := make([]string, 150)
+	for i := range oversized {
+		oversized[i] = fmt.Sprintf("*.wide%d.com", i)
+	}
+	state.Certificates[0].DNSNames = oversized
+	state.Certificates[0].Listeners = domain.SplitListenerHostnames(oversized)
+
+	r := &WildcardCertificatePolicyReconciler{Clock: fixedClock{}}
+	policy := &v1alpha1.WildcardCertificatePolicy{}
+	r.recordPlan(policy, state)
+
+	if got := len(policy.Status.ApplicationGateway.Listeners); got > maxReportedListeners {
+		t.Errorf("reported %d listeners, more than the %d the CRD allows", got, maxReportedListeners)
+	}
+	// Truncating without saying so would read as "this plan fits on one
+	// gateway", which is the opposite of what 120 listeners means.
+	// 59 certificates of six SANs (two listeners each) plus one of 150 (thirty).
+	if got, want := policy.Status.ApplicationGateway.ListenerCount, int32(59*2+30); got != want {
+		t.Errorf("listenerCount = %d, want the true total %d", got, want)
+	}
+	for _, cert := range policy.Status.RequiredCertificates {
+		if got := len(cert.DNSNames); got > maxReportedDNSNames {
+			t.Errorf("%s reported %d SANs, more than the %d the CRD allows",
+				cert.Name, got, maxReportedDNSNames)
+		}
+	}
+	if got, want := policy.Status.RequiredCertificateCount, int32(zones); got != want {
+		t.Errorf("requiredCertificateCount = %d, want %d", got, want)
+	}
+}
+
+type fixedClock struct{}
+
+func (fixedClock) Now() time.Time { return time.Unix(1700000000, 0) }
+
+func TestApplyOutcomeDropsTheGaugeOfARenamedCertificate(t *testing.T) {
+	// Not parallel: it asserts on package-level metrics.
+	//
+	// The gauge is labelled by certificate name, so renaming one leaves the old
+	// series exported forever -- reporting an expiry that nothing refreshes,
+	// which is exactly the signal this metric exists to make trustworthy.
+	certificateNotAfter.Reset()
+	t.Cleanup(certificateNotAfter.Reset)
+
+	r := &KeyVaultCertificateSyncReconciler{Clock: fixedClock{}}
+	sync := &v1alpha1.KeyVaultCertificateSync{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "apps", Name: "wildcard"},
+	}
+	notAfter := time.Unix(1700000000, 0)
+
+	r.applyOutcome(sync, app.SyncOutcome{
+		Action: domain.ActionImport, CertificateName: "wildcard-x-com", NotAfter: notAfter,
+	})
+	r.applyOutcome(sync, app.SyncOutcome{
+		Action: domain.ActionImport, CertificateName: "wildcard-y-com", NotAfter: notAfter,
+	})
+
+	const want = `
+# HELP certsync_certificate_not_after_timestamp_seconds Expiry of the synced certificate, in unix seconds.
+# TYPE certsync_certificate_not_after_timestamp_seconds gauge
+certsync_certificate_not_after_timestamp_seconds{certificate="wildcard-y-com",name="wildcard",namespace="apps"} 1.7e+09
+`
+	if err := testutil.CollectAndCompare(certificateNotAfter, strings.NewReader(want)); err != nil {
+		t.Errorf("the renamed certificate left a stale series behind:\n%v", err)
+	}
 }

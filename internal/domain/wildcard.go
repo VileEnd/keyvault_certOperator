@@ -59,6 +59,14 @@ type PlanInput struct {
 	Zones []string
 	// MaxCertificates caps how many certificates may be planned.
 	MaxCertificates int
+	// Existing names the certificates that have already been issued.
+	//
+	// It changes nothing until MaxCertificates is reached, and then decides
+	// which certificates keep their slot: an existing one is never evicted to
+	// make room for a new one. Without that, adding a zone whose name sorts
+	// early would push an unrelated certificate out of the plan -- and under
+	// orphanPolicy: Prune, out of the plan means deleted.
+	Existing []string
 	// Grouping selects the packing strategy; empty means GroupingPerZone.
 	Grouping Grouping
 	// IssueZoneWildcards plans "*.zone" for every configured zone, whether or
@@ -152,7 +160,7 @@ func BuildPlan(in PlanInput) (Plan, error) {
 		return Plan{}, err
 	}
 
-	certs, overflow := applyLimit(certs, in.MaxCertificates)
+	certs, overflow := applyLimit(certs, in.MaxCertificates, in.Existing)
 	for _, cert := range overflow {
 		for _, name := range cert.DNSNames {
 			plan.Skipped = append(plan.Skipped, SkippedHost{Host: name, Reason: ReasonMaxCertificates})
@@ -203,7 +211,7 @@ func group(required map[string]map[string]struct{}, grouping Grouping) ([]Certif
 		names := sortedKeys(required[zone])
 		switch grouping {
 		case GroupingPerZone:
-			cert, err := newRequest(zone, "*."+zone, names)
+			cert, err := newRequest(zone, perZoneNameSeed(zone, names), names)
 			if err != nil {
 				return nil, err
 			}
@@ -242,6 +250,28 @@ func group(required map[string]map[string]struct{}, grouping Grouping) ([]Certif
 	return resolveNameCollisions(certs), nil
 }
 
+// perZoneNameSeed picks the SAN a zone certificate should be named after.
+//
+// The zone's own wildcard wins when it is covered, which is the ordinary case
+// and keeps the name an Application Gateway listener is already configured
+// with. Naming after the zone unconditionally would be a lie whenever
+// "*.<zone>" is not actually a SAN: a certificate holding only "*.b.x.com"
+// would still be called "wildcard-x-com", and wiring that onto an "*.x.com"
+// listener fails every request the listener accepts.
+//
+// The consequence to know about is that discovering "*.<zone>" later renames
+// the certificate, leaving the old one as an orphan. Setting
+// issueZoneWildcards pins the name, because the zone wildcard is then always
+// covered.
+func perZoneNameSeed(zone string, names []string) string {
+	if wildcard := "*." + zone; contains(names, wildcard) {
+		return wildcard
+	}
+	// PrimaryDNSName already prefers a wildcard over a plain name and breaks
+	// ties by sort order, which is exactly the choice to make here too.
+	return PrimaryDNSName(names)
+}
+
 func newRequest(zone, nameSeed string, dnsNames []string) (CertificateRequest, error) {
 	name, err := DeriveVaultCertificateName(nameSeed)
 	if err != nil {
@@ -256,21 +286,67 @@ func newRequest(zone, nameSeed string, dnsNames []string) (CertificateRequest, e
 // not injective, so "foo.example.com" and "foo-example.com" would otherwise
 // share a Key Vault object.
 func resolveNameCollisions(certs []CertificateRequest) []CertificateRequest {
-	seen := map[string]int{}
+	seen := map[string]struct{}{}
 	for i, cert := range certs {
-		if n := seen[cert.Name]; n > 0 {
-			certs[i].Name = DisambiguateVaultName(cert.Name, strings.Join(cert.DNSNames, ","))
+		name := cert.Name
+		if _, taken := seen[name]; taken {
+			name = DisambiguateVaultName(name, strings.Join(cert.DNSNames, ","))
 		}
-		seen[cert.Name]++
+		// Registered under the name actually used, not the one it collided
+		// with, so a disambiguated name cannot silently collide in its turn.
+		seen[name] = struct{}{}
+		certs[i].Name = name
 	}
 	return certs
 }
 
-func applyLimit(certs []CertificateRequest, max int) (kept, overflow []CertificateRequest) {
+// applyLimit enforces MaxCertificates, preferring certificates that already
+// exist over ones that would be new.
+//
+// Truncating the sorted plan instead is what the cap used to do, and it evicts
+// whichever name happens to sort last. That is a silent outage under
+// orphanPolicy: Prune -- the evicted certificate is no longer in the plan, so
+// it is an orphan, so it is deleted -- triggered by adding an unrelated zone.
+// Overflowing the *new* certificate says the same thing ("you are at the cap")
+// without taking down something the cluster is already serving.
+func applyLimit(certs []CertificateRequest, max int, existing []string) (kept, overflow []CertificateRequest) {
 	if max <= 0 || len(certs) <= max {
 		return certs, nil
 	}
-	return certs[:max], certs[max:]
+
+	issued := make(map[string]struct{}, len(existing))
+	for _, name := range existing {
+		issued[name] = struct{}{}
+	}
+
+	// Two passes over the already-sorted plan: existing certificates claim
+	// their slots first, then whatever room is left goes to new ones. Both walk
+	// the plan in order, so lowering MaxCertificates drops deterministically
+	// rather than arbitrarily.
+	keep := make(map[string]struct{}, max)
+	for _, cert := range certs {
+		if len(keep) == max {
+			break
+		}
+		if _, ok := issued[cert.Name]; ok {
+			keep[cert.Name] = struct{}{}
+		}
+	}
+	for _, cert := range certs {
+		if len(keep) == max {
+			break
+		}
+		keep[cert.Name] = struct{}{}
+	}
+
+	for _, cert := range certs {
+		if _, ok := keep[cert.Name]; ok {
+			kept = append(kept, cert)
+		} else {
+			overflow = append(overflow, cert)
+		}
+	}
+	return kept, overflow
 }
 
 // normalizeZones lowercases, de-duplicates and validates the allowlist.

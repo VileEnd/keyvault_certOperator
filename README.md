@@ -118,6 +118,16 @@ helm upgrade --install keyvault-certoperator ./charts/keyvault-certoperator \
 
 Or with kustomize: `make deploy IMG=<your-image>`.
 
+> **Upgrading does not update the CRDs.** Helm installs everything in a chart's
+> `crds/` directory once and never touches it again — by design, and with no
+> flag to change it. So `helm upgrade` ships a new operator against the old
+> schema, which is how a field whose default was deliberately *removed* keeps
+> being defaulted. Apply them yourself alongside the upgrade:
+>
+> ```bash
+> kubectl apply -f charts/keyvault-certoperator/crds/
+> ```
+
 > **Pin the ServiceAccount name.** The federated credential matches
 > `system:serviceaccount:<ns>:<name>` as a literal string, and the two install
 > paths disagree: Helm names it after the release, kustomize appends

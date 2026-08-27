@@ -57,6 +57,7 @@ type options struct {
 	watchNamespaces string
 	credentialMode  string
 	allowedVaults   string
+	azureCloud      string
 }
 
 func main() {
@@ -86,6 +87,11 @@ func run() error {
 			"Empty permits any vault the identity has rights on. Set this to the same "+
 			"vault the identity was granted, so a resource naming another vault fails "+
 			"fast as a configuration error instead of backing off against a 403.")
+	flag.StringVar(&opts.azureCloud, "azure-cloud", string(azure.CloudPublic),
+		"The Azure cloud this operator's identity lives in: "+strings.Join(azure.KnownClouds(), ", ")+". "+
+			"It resolves every bare Key Vault name -- in --allowed-vaults and in any resource that "+
+			"does not name a cloud of its own -- so a sovereign-cloud deployment sets it once here "+
+			"rather than on every resource.")
 	flag.StringVar(&opts.credentialMode, "azure-credential", string(azure.CredentialWorkloadIdentity),
 		"How to authenticate to Azure: workload-identity (default) or default (local development only).")
 
@@ -101,6 +107,11 @@ func run() error {
 		return fmt.Errorf("creating the manager: %w", err)
 	}
 
+	cloud, err := azure.ParseCloud(opts.azureCloud)
+	if err != nil {
+		return fmt.Errorf("parsing --azure-cloud: %w", err)
+	}
+
 	credential, err := azure.NewCredential(azure.CredentialMode(opts.credentialMode))
 	if err != nil {
 		return err
@@ -108,7 +119,7 @@ func run() error {
 	vault := azure.NewRepository(azure.NewClientFactory(credential, nil))
 	clock := app.RealClock{}
 
-	allowedVaults, err := parseAllowedVaults(opts.allowedVaults)
+	allowedVaults, err := parseAllowedVaults(opts.allowedVaults, cloud)
 	if err != nil {
 		return fmt.Errorf("parsing --allowed-vaults: %w", err)
 	}
@@ -126,6 +137,7 @@ func run() error {
 		Vault:    vault,
 		Clock:    clock,
 
+		Cloud:         cloud,
 		AllowedVaults: allowedVaults,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setting up the certificate sync controller: %w", err)
@@ -170,6 +182,7 @@ func run() error {
 		Clock:               clock,
 		HTTPRoutesAvailable: httpRoutes,
 		GatewaysAvailable:   gateways,
+		Cloud:               cloud,
 		AllowedVaults:       allowedVaults,
 	}).SetupWithManager(mgr, watches); err != nil {
 		return fmt.Errorf("setting up the wildcard policy controller: %w", err)
@@ -248,14 +261,20 @@ func cacheOptions(opts options) cache.Options {
 // controllers use, so a bare name and its URL compare equal and an entry that
 // is not a vault at all is rejected at startup rather than silently never
 // matching anything.
-func parseAllowedVaults(value string) (domain.VaultAllowlist, error) {
+//
+// The cloud is the operator's own, not a hardcoded public one. Resolving a bare
+// name against the wrong cloud yields an allowlist entry that no resource can
+// ever match, so on a sovereign cloud every certificate would fail as
+// ErrVaultNotAllowed -- terminally, since that error is deliberately not
+// retryable.
+func parseAllowedVaults(value string, cloud azure.Cloud) (domain.VaultAllowlist, error) {
 	var allowed domain.VaultAllowlist
 	for _, entry := range strings.Split(value, ",") {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
 			continue
 		}
-		url, err := azure.VaultURL(entry, azure.CloudPublic)
+		url, err := azure.VaultURL(entry, cloud)
 		if err != nil {
 			return nil, fmt.Errorf("%q: %w", entry, err)
 		}

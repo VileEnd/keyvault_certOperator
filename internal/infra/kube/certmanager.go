@@ -2,7 +2,6 @@ package kube
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
@@ -47,11 +46,10 @@ func (w *CertificateWriter) Available(_ context.Context) (bool, error) {
 	if err == nil {
 		return true, nil
 	}
+	// IsNoMatchError already covers both NoKindMatchError and
+	// NoResourceMatchError, which is the whole "the API server does not serve
+	// this" family.
 	if meta.IsNoMatchError(err) {
-		return false, nil
-	}
-	var discoveryErr *meta.NoResourceMatchError
-	if errors.As(err, &discoveryErr) {
 		return false, nil
 	}
 	return false, fmt.Errorf("checking for the cert-manager Certificate CRD: %w", err)

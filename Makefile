@@ -10,6 +10,9 @@ ENVTEST_K8S_VERSION ?= 1.36
 GOLANGCI_LINT_VERSION ?= v2.13.1
 KUSTOMIZE_VERSION ?= v5.8.1
 HELM_VERSION ?= v3.19.0
+
+# A placeholder client ID, so linting does not need a real Azure identity.
+CHART_LINT_CLIENT_ID ?= 00000000-0000-0000-0000-000000000000
 # Terraform is no longer present on the GitHub runner image, so CI installs it
 # the same way a developer machine does.
 TERRAFORM_VERSION ?= 1.14.3
@@ -17,6 +20,9 @@ GOVULNCHECK_VERSION ?= v1.7.0
 # Pinned so CI and a developer machine run the same Kubernetes, and so the
 # download is reproducible rather than whatever get.k3s.io serves today.
 K3S_VERSION ?= v1.36.3+k3s1
+# Pinned here rather than in each caller, so the e2e suite and the chart-install
+# job cannot end up testing against different Gateway API versions.
+GATEWAY_API_VERSION ?= v1.6.1
 
 LOCALBIN ?= $(shell pwd)/bin
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
@@ -191,28 +197,43 @@ tf-validate: terraform ## Validate the Terraform module and example against the 
 print-k3s-version: ## Print the pinned k3s version, so CI installs what the Makefile says.
 	@echo $(K3S_VERSION)
 
+.PHONY: print-gateway-api-version
+print-gateway-api-version: ## Print the pinned Gateway API version.
+	@echo $(GATEWAY_API_VERSION)
+
 .PHONY: helm
 helm: $(LOCALBIN)
 	@test -x $(HELM) || GOBIN=$(LOCALBIN) go install helm.sh/helm/v3/cmd/helm@$(HELM_VERSION)
 
 ##@ Helm
 
+.PHONY: helm-manifests
+helm-manifests: helm-crds helm-rbac ## Sync everything generated into the chart.
+
 .PHONY: helm-crds
 helm-crds: manifests ## Sync the generated CRDs into the chart.
 	cp config/crd/bases/*.yaml charts/keyvault-certoperator/crds/
 
-.PHONY: check-helm-crds
-check-helm-crds: helm-crds ## Fail if the chart's CRDs are stale.
+.PHONY: helm-rbac
+helm-rbac: manifests ## Sync the generated RBAC rules into the chart.
+	go run ./hack/helmrbac -o charts/keyvault-certoperator/templates/_rbac-rules.tpl
+
+.PHONY: check-helm-manifests
+check-helm-manifests: helm-manifests ## Fail if anything generated in the chart is stale.
 	@if [ -n "$$(git status --porcelain charts/)" ]; then \
-		echo "the chart's CRDs are out of date; run 'make helm-crds' and commit the result"; \
+		echo "the chart is out of date; run 'make helm-manifests' and commit the result"; \
 		git --no-pager diff -- charts/; \
 		exit 1; \
 	fi
 
 .PHONY: helm-lint
-helm-lint: helm ## Lint and render the chart.
-	$(HELM) lint charts/keyvault-certoperator --set azure.clientId=00000000-0000-0000-0000-000000000000
-	$(HELM) template ci charts/keyvault-certoperator --set azure.clientId=00000000-0000-0000-0000-000000000000 > /dev/null
+helm-lint: helm ## Lint the chart, render it, and check what it actually grants.
+	$(HELM) lint charts/keyvault-certoperator --set azure.clientId=$(CHART_LINT_CLIENT_ID)
+	$(HELM) template ci charts/keyvault-certoperator --set azure.clientId=$(CHART_LINT_CLIENT_ID) \
+		> $(LOCALBIN)/chart-rendered.yaml
+	# The staleness gate cannot see a deleted include, so what the chart really
+	# grants is compared against config/rbac rather than against the template.
+	go run ./hack/helmrbac -verify $(LOCALBIN)/chart-rendered.yaml
 
 ##@ End-to-end
 

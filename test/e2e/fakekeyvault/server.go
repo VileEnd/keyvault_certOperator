@@ -78,14 +78,6 @@ const AuthorityHost = "login.microsoftonline.com"
 // TenantID is the tenant the challenge points the credential at.
 const TenantID = "11111111-1111-1111-1111-111111111111"
 
-// New starts a fake Key Vault on an ephemeral port. Suitable for unit-style use
-// where the challenge flow is not exercised.
-func New() *Server {
-	s := &Server{certs: map[string]stored{}}
-	s.http = httptest.NewTLSServer(http.HandlerFunc(s.route))
-	return s
-}
-
 // NewOnPort443 starts the fake bound to 127.0.0.1:443 with a certificate valid
 // for both the vault and the login host, so the full challenge-and-token flow
 // works end to end. The caller must map both names to loopback.

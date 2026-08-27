@@ -315,3 +315,119 @@ func TestBuildPlanSeedingStillHonoursTheGuards(t *testing.T) {
 		t.Errorf("skipped = %+v, want the overflow reported with ReasonMaxCertificates", plan.Skipped)
 	}
 }
+
+func TestBuildPlanNamesAZoneCertificateAfterWhatItCovers(t *testing.T) {
+	t.Parallel()
+	// The name is what an Application Gateway listener is configured with, so
+	// "wildcard-x-com" has to mean a certificate that actually carries
+	// "*.x.com". Naming every zone certificate after its zone made it mean
+	// "the certificate for zone x.com", which serves nothing on that listener.
+	tests := []struct {
+		name  string
+		hosts []string
+		want  domain.CertificateRequest
+	}{
+		{
+			name:  "no zone wildcard is covered",
+			hosts: []string{"a.b.x.com"},
+			want: domain.CertificateRequest{
+				Name: "wildcard-b-x-com", Zone: "x.com", DNSNames: []string{"*.b.x.com"},
+			},
+		},
+		{
+			name:  "only the apex is covered",
+			hosts: []string{"x.com"},
+			want: domain.CertificateRequest{
+				Name: "x-com", Zone: "x.com", DNSNames: []string{"x.com"},
+			},
+		},
+		{
+			name:  "the zone wildcard wins when it is covered",
+			hosts: []string{"a.x.com", "a.b.x.com", "x.com"},
+			want: domain.CertificateRequest{
+				Name: "wildcard-x-com", Zone: "x.com",
+				DNSNames: []string{"*.b.x.com", "*.x.com", "x.com"},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			plan, err := domain.BuildPlan(domain.PlanInput{Hosts: tc.hosts, Zones: []string{"x.com"}})
+			if err != nil {
+				t.Fatalf("BuildPlan: %v", err)
+			}
+			want := []domain.CertificateRequest{tc.want}
+			if !reflect.DeepEqual(plan.Certificates, want) {
+				t.Errorf("certificates =\n  %+v\nwant\n  %+v", plan.Certificates, want)
+			}
+		})
+	}
+}
+
+func TestBuildPlanCapNeverEvictsAnIssuedCertificate(t *testing.T) {
+	t.Parallel()
+	// Reaching the cap must overflow the *new* certificate. Dropping an issued
+	// one instead takes it out of the plan, which makes it an orphan, which
+	// under orphanPolicy: Prune deletes it -- an outage caused by adding an
+	// unrelated zone.
+	const cap = 2
+	issued := planNames(t, domain.PlanInput{
+		Zones: []string{"m.com", "z.com"}, MaxCertificates: cap, IssueZoneWildcards: true,
+	})
+	if want := []string{"wildcard-m-com", "wildcard-z-com"}; !reflect.DeepEqual(issued, want) {
+		t.Fatalf("issued = %v, want %v", issued, want)
+	}
+
+	// "b.com" sorts before both, so truncating the sorted plan would drop
+	// "wildcard-z-com" -- the certificate the cluster is already serving.
+	plan, err := domain.BuildPlan(domain.PlanInput{
+		Zones:              []string{"m.com", "z.com", "b.com"},
+		MaxCertificates:    cap,
+		IssueZoneWildcards: true,
+		Existing:           issued,
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	got := requestNames(plan.Certificates)
+	if !reflect.DeepEqual(got, issued) {
+		t.Errorf("certificates = %v, want the already-issued %v", got, issued)
+	}
+	want := []domain.SkippedHost{{Host: "*.b.com", Reason: domain.ReasonMaxCertificates}}
+	if !reflect.DeepEqual(plan.Skipped, want) {
+		t.Errorf("skipped = %+v, want %+v", plan.Skipped, want)
+	}
+}
+
+func TestBuildPlanCapStillFillsFromNothing(t *testing.T) {
+	t.Parallel()
+	// With nothing issued the cap has no existing certificate to protect, so it
+	// takes the plan in order. Without this the fix above could pass by never
+	// applying the cap at all.
+	got := planNames(t, domain.PlanInput{
+		Zones: []string{"m.com", "z.com", "b.com"}, MaxCertificates: 2, IssueZoneWildcards: true,
+	})
+	if want := []string{"wildcard-b-com", "wildcard-m-com"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("certificates = %v, want %v", got, want)
+	}
+}
+
+func planNames(t *testing.T, in domain.PlanInput) []string {
+	t.Helper()
+	plan, err := domain.BuildPlan(in)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	return requestNames(plan.Certificates)
+}
+
+func requestNames(certs []domain.CertificateRequest) []string {
+	out := make([]string, 0, len(certs))
+	for _, cert := range certs {
+		out = append(out, cert.Name)
+	}
+	return out
+}

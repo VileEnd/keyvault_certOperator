@@ -76,7 +76,7 @@ jobs:
       # Fails if the CRDs, RBAC or deepcopy code drift from the Go markers, or if
       # the chart's copy of the CRDs is stale.
       - run: make check-manifests
-      - run: make check-helm-crds
+      - run: make check-helm-manifests
 
   chart:
     name: Helm chart
@@ -294,6 +294,21 @@ jobs:
           done
       - name: Load the image into k3s
         run: docker save keyvault-certoperator:ci | sudo k3s ctr images import -
+      # Installed before the chart, and deliberately so. The operator opens a
+      # Gateway informer whenever the API server serves the kind, so this is
+      # what makes the job exercise the chart's own RBAC rather than only the
+      # subset a bare cluster happens to need. Without it the chart could -- and
+      # did -- ship without permission to list Gateways while this job stayed
+      # green.
+      - name: Install Gateway API
+        env:
+          KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+        run: |
+          version="$(make -s print-gateway-api-version)"
+          kubectl apply -f \
+            "https://github.com/kubernetes-sigs/gateway-api/releases/download/$version/standard-install.yaml"
+          kubectl wait --for=condition=Established --timeout=120s \
+            crd/gateways.gateway.networking.k8s.io crd/httproutes.gateway.networking.k8s.io
       # The Azure Workload Identity webhook is not installed on this cluster, so
       # the AZURE_* variables it would inject are supplied by hand. The
       # credential constructor only checks that they are present -- it never
