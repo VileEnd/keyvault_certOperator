@@ -24,6 +24,10 @@ const (
 	ReasonIssuanceFailed     = "IssuanceFailed"
 	ReasonCertManagerMissing = "CertManagerMissing"
 	ReasonCertManagerFound   = "CertManagerFound"
+	// ReasonPruneWithheld means orphaned resources were found but deliberately
+	// not deleted, because the discovery pass they were judged against could
+	// not be trusted to be complete.
+	ReasonPruneWithheld = "PruneWithheld"
 )
 
 func setCondition(conditions *[]metav1.Condition, conditionType, reason, message string,

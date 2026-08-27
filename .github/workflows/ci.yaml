@@ -4,8 +4,11 @@ on:
   push:
     branches: ["main"]
     paths-ignore: ["**.md", "docs/**", "LICENSE"]
+  # Deliberately no paths-ignore here. Required status checks gate pull
+  # requests, and a PR that produces no check runs at all can never satisfy
+  # them -- so a docs-only PR would block permanently the moment branch
+  # protection is switched on. The saving is kept on push, where nothing gates.
   pull_request:
-    paths-ignore: ["**.md", "docs/**", "LICENSE"]
   workflow_dispatch:
 
 permissions:

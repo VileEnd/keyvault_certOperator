@@ -56,8 +56,10 @@ spec:
   keyVault:
     name: my-vault
 
-  # Retain, not Prune. Under Prune a discovery pass that returns zero hosts --
-  # a restart before the Gateway API CRDs are registered is enough -- deletes
-  # every generated Certificate, destroying the issued Secret and forcing
-  # re-issuance against Let's Encrypt's duplicate-certificate limit.
+  # Retain is still the conservative choice. Prune is guarded -- it is withheld
+  # when discovery planned nothing at all, or when a source this policy
+  # explicitly enabled was unavailable at startup -- but Retain never deletes a
+  # generated Certificate in the first place, and losing one destroys the issued
+  # Secret. Note that issueZoneWildcards above already makes the plan
+  # independent of discovery, so the empty-pass case cannot arise here.
   orphanPolicy: Retain

@@ -142,7 +142,7 @@ func (r *WildcardCertificatePolicyReconciler) Reconcile(ctx context.Context, req
 		return ctrl.Result{}, err
 	}
 
-	orphans, err := r.handleOrphans(ctx, &policy, state)
+	orphans, pruneWithheld, err := r.handleOrphans(ctx, &policy, state)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -150,10 +150,28 @@ func (r *WildcardCertificatePolicyReconciler) Reconcile(ctx context.Context, req
 	message := fmt.Sprintf("%d certificate(s) required from %d discovered hostname(s)",
 		len(state.Certificates), len(state.DiscoveredHosts))
 	if orphans > 0 {
-		message += fmt.Sprintf("; %d no longer required and %s",
-			orphans, orphanVerb(policy.Spec.OrphanPolicy))
+		verb := orphanVerb(policy.Spec.OrphanPolicy)
+		if pruneWithheld != "" {
+			verb = "retained despite orphanPolicy: Prune"
+		}
+		message += fmt.Sprintf("; %d no longer required and %s", orphans, verb)
 	}
 	setTrue(&policy.Status.Conditions, v1alpha1.ConditionDiscovered, ReasonSynced, message, policy.Generation)
+
+	// Withholding a prune leaves the cluster in a correct but unintended state,
+	// so it is surfaced rather than logged: the resources are still there and
+	// the operator is not going to remove them until the cause is addressed.
+	if pruneWithheld != "" {
+		withheldMsg := fmt.Sprintf("%s; %d orphaned resource(s) were kept rather than deleted because %s",
+			message, orphans, pruneWithheld)
+		setFalse(&policy.Status.Conditions, v1alpha1.ConditionReady, ReasonPruneWithheld, withheldMsg, policy.Generation)
+		r.event(&policy, corev1.EventTypeWarning, ReasonPruneWithheld, "Prune", withheldMsg)
+		if err := r.updateStatus(ctx, &policy); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: jitter(DefaultDiscoveryInterval)}, nil
+	}
+
 	setTrue(&policy.Status.Conditions, v1alpha1.ConditionReady, ReasonSynced, message, policy.Generation)
 
 	if err := r.updateStatus(ctx, &policy); err != nil {
@@ -263,18 +281,28 @@ func (r *WildcardCertificatePolicyReconciler) ensureSync(
 // certificate itself is left alone.
 func (r *WildcardCertificatePolicyReconciler) handleOrphans(
 	ctx context.Context, policy *v1alpha1.WildcardCertificatePolicy, state app.DesiredState,
-) (int, error) {
+) (int, string, error) {
 	wanted := make(map[string]struct{}, len(state.Certificates))
 	for _, cert := range state.Certificates {
 		wanted[cert.Name] = struct{}{}
 	}
+
+	// Pruning is judged entirely against the current discovery pass, so it is
+	// only safe when that pass can be trusted to be complete. A failed pass
+	// never reaches here -- plan() returns early -- but a pass that succeeds
+	// while seeing nothing is indistinguishable from one that is misconfigured,
+	// and the destructive reading is the wrong default. Deleting a generated
+	// Certificate destroys the issued Secret, so recovering costs a fresh
+	// issuance against Let's Encrypt's duplicate-certificate limit.
+	withheld := r.pruneWithheldReason(policy, state)
+	pruning := policy.Spec.OrphanPolicy == v1alpha1.OrphanPrune && withheld == ""
 
 	selector := client.MatchingLabels{v1alpha1.LabelPolicy: policy.Name}
 	inNamespace := client.InNamespace(policy.Spec.CertificateNamespace)
 
 	var syncs v1alpha1.KeyVaultCertificateSyncList
 	if err := r.List(ctx, &syncs, inNamespace, selector); err != nil {
-		return 0, fmt.Errorf("listing generated sync resources: %w", err)
+		return 0, "", fmt.Errorf("listing generated sync resources: %w", err)
 	}
 
 	orphans := 0
@@ -284,18 +312,18 @@ func (r *WildcardCertificatePolicyReconciler) handleOrphans(
 			continue
 		}
 		orphans++
-		if policy.Spec.OrphanPolicy != v1alpha1.OrphanPrune {
+		if !pruning {
 			continue
 		}
 		if err := r.Delete(ctx, item); err != nil && client.IgnoreNotFound(err) != nil {
-			return orphans, fmt.Errorf("pruning sync resource %s: %w", item.Name, err)
+			return orphans, withheld, fmt.Errorf("pruning sync resource %s: %w", item.Name, err)
 		}
 	}
 
-	if policy.Spec.OrphanPolicy == v1alpha1.OrphanPrune {
+	if pruning {
 		var certs cmapi.CertificateList
 		if err := r.List(ctx, &certs, inNamespace, selector); err != nil {
-			return orphans, fmt.Errorf("listing generated certificates: %w", err)
+			return orphans, withheld, fmt.Errorf("listing generated certificates: %w", err)
 		}
 		for i := range certs.Items {
 			item := &certs.Items[i]
@@ -303,11 +331,52 @@ func (r *WildcardCertificatePolicyReconciler) handleOrphans(
 				continue
 			}
 			if err := r.Delete(ctx, item); err != nil && client.IgnoreNotFound(err) != nil {
-				return orphans, fmt.Errorf("pruning certificate %s: %w", item.Name, err)
+				return orphans, withheld, fmt.Errorf("pruning certificate %s: %w", item.Name, err)
 			}
 		}
 	}
-	return orphans, nil
+
+	// Nothing to withhold if nothing was orphaned in the first place.
+	if orphans == 0 {
+		withheld = ""
+	}
+	return orphans, withheld, nil
+}
+
+// pruneWithheldReason explains why pruning must not run, or "" when it may.
+//
+// Both cases refuse rather than trying to tell apart states that genuinely look
+// identical from inside the operator.
+func (r *WildcardCertificatePolicyReconciler) pruneWithheldReason(
+	policy *v1alpha1.WildcardCertificatePolicy, state app.DesiredState,
+) string {
+	if policy.Spec.OrphanPolicy != v1alpha1.OrphanPrune {
+		return ""
+	}
+
+	// A plan with nothing in it means either the cluster routes nothing at all
+	// or discovery is misconfigured -- a namespaceSelector matching no
+	// namespace, or every source switched off. Those are the same observation,
+	// and one of them costs every issued certificate.
+	if len(state.Certificates) == 0 {
+		return "the discovery pass planned no certificates at all, which cannot be told apart " +
+			"from a misconfiguration; set issueZoneWildcards to make the plan independent of discovery"
+	}
+
+	// A source the policy asked for but which the operator could not watch
+	// makes the view partial by construction. Gateway API is the live case:
+	// its watches are established only if the CRDs are served at startup, so a
+	// restart before they are registered silently narrows discovery.
+	discovery := policy.Spec.Discovery
+	if !r.HTTPRoutesAvailable && explicitlyEnabled(discovery, func(d *v1alpha1.DiscoverySpec) *bool { return d.HTTPRoutes }) {
+		return "discovery.httpRoutes is enabled but the Gateway API CRDs were absent when the operator started, " +
+			"so the discovered set is incomplete"
+	}
+	if !r.GatewaysAvailable && explicitlyEnabled(discovery, func(d *v1alpha1.DiscoverySpec) *bool { return d.Gateways }) {
+		return "discovery.gateways is enabled but the Gateway API CRDs were absent when the operator started, " +
+			"so the discovered set is incomplete"
+	}
+	return ""
 }
 
 func (r *WildcardCertificatePolicyReconciler) recordPlan(
@@ -414,6 +483,23 @@ func namespaceSelector(discovery *v1alpha1.DiscoverySpec) *metav1.LabelSelector 
 		return nil
 	}
 	return discovery.NamespaceSelector
+}
+
+// explicitlyEnabled reports whether the field was actually set to true, as
+// opposed to merely defaulting to it.
+//
+// The distinction matters only where the absence of a source should be treated
+// as a problem. "httpRoutes: true" written by hand states a requirement; the
+// same value arrived at by default states nothing, because it is what every
+// policy carries whether or not the cluster runs Gateway API. Using enabled()
+// here would withhold pruning on every cluster without Gateway API installed,
+// which is most of them.
+func explicitlyEnabled(discovery *v1alpha1.DiscoverySpec, pick func(*v1alpha1.DiscoverySpec) *bool) bool {
+	if discovery == nil {
+		return false
+	}
+	value := pick(discovery)
+	return value != nil && *value
 }
 
 // enabled defaults an optional boolean to true, matching the CRD defaults.

@@ -159,6 +159,14 @@ type WildcardCertificatePolicySpec struct {
 	KeyVault KeyVaultSpec `json:"keyVault"`
 
 	// OrphanPolicy decides what happens to no-longer-required certificates.
+	//
+	// Prune is guarded: pruning is judged against the current discovery pass, so
+	// the operator withholds it when that pass planned nothing at all, or when a
+	// source the policy explicitly enabled was unavailable at startup. Either
+	// case is reported as PruneWithheld rather than acted on, because deleting a
+	// generated Certificate destroys the issued Secret. Setting
+	// IssueZoneWildcards removes the empty-pass case by making the plan
+	// independent of discovery.
 	// +optional
 	// +kubebuilder:default=Retain
 	OrphanPolicy OrphanPolicy `json:"orphanPolicy,omitempty"`

@@ -80,7 +80,7 @@ Full setup guide, including troubleshooting: **[docs/azure-setup.md](docs/azure-
 
 ```hcl
 module "certoperator_identity" {
-  source = "github.com/VileEnd/keyvault_certOperator//terraform"
+  source = "github.com/VileEnd/keyvault_certOperator//terraform?ref=v0.1.0"
 
   resource_group_name = "my-rg"
   location            = "westeurope"
@@ -219,11 +219,16 @@ Two operational notes:
   controller-runtime cannot open an informer for a type the API server does not
   serve. Installing Gateway API afterwards needs a restart. The startup log says
   which sources are active.
-- Keep `orphanPolicy` at its default `Retain`. Under `Prune`, a discovery pass
-  that legitimately returns zero hosts deletes every generated `Certificate` —
-  which destroys the issued Secret and forces re-issuance against Let's
-  Encrypt's duplicate-certificate limit. A restart with Gateway API CRDs not yet
-  registered is enough to produce that pass.
+- `orphanPolicy: Prune` is guarded, but know what the guard does. Pruning is
+  judged against the current discovery pass, so it is withheld when that pass
+  cannot be trusted: when it planned **no certificates at all** — which is
+  indistinguishable from a selector matching nothing or every source switched
+  off — or when a source the policy **explicitly** enabled was unavailable at
+  startup. Either case reports `Ready=False` with reason `PruneWithheld` and
+  deletes nothing, because deleting a generated `Certificate` destroys the
+  issued Secret and forces re-issuance against Let's Encrypt's duplicate limit.
+  `issueZoneWildcards: true` removes the empty-pass case outright by making the
+  plan independent of discovery.
 
 ### `KeyVaultCertificateSync` (namespaced)
 
