@@ -12,8 +12,14 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Tag to build, for re-running a release that failed after tagging.
+        description: Tag to publish, e.g. v0.1.0.
         required: true
+      create_tag:
+        description: >-
+          Create the tag on the default branch first. Leave this off to re-run a
+          release whose tag already exists.
+        type: boolean
+        default: false
 
 permissions:
   # contents: write is for creating the GitHub Release and attaching the
@@ -34,7 +40,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          # When the tag is being created there is nothing to check out by that
+          # name yet, so start from the default branch -- which is the commit
+          # the tag will point at, so everything below builds exactly what was
+          # tagged.
+          ref: ${{ (inputs.create_tag && github.event.repository.default_branch) || inputs.tag || github.ref }}
+          # Full history, so pushing a tag does not depend on what a shallow
+          # clone happens to contain.
+          fetch-depth: 0
 
       # The tag is the single source of the version. Deriving it here rather
       # than accepting an input keeps the image tag and the git tag identical by
@@ -74,6 +87,27 @@ jobs:
           go build ./...
           go vet ./...
           make test-unit
+
+      # Deliberately after the tests and the chart guard, and deliberately not
+      # in a workflow of its own. A tag is permanent, so it is minted only once
+      # the commit is known to build and to agree with the chart -- and doing it
+      # inside this run means the publishing below happens straight away. A tag
+      # pushed by GITHUB_TOKEN does not start a new workflow run, so a separate
+      # tagging workflow would create the tag and publish nothing.
+      - name: Create the tag
+        if: ${{ inputs.create_tag }}
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "$TAG already exists. Re-run this workflow with create_tag off to"
+            echo "publish it again; deleting and re-pushing a released tag is worse."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "$TAG"
+          git push origin "refs/tags/$TAG"
 
       - name: Log in to the registry
         run: |
