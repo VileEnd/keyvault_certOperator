@@ -104,6 +104,25 @@ jobs:
             exit 1
           fi
 
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Terraform is not on the runner image, so it is installed from the
+      # version the Makefile pins, checksum-verified, into the cached ./bin --
+      # the same path every other tool in this repo takes.
+      - uses: ./.github/actions/go-tools
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Format
+        run: make tf-fmt
+      # init needs the provider registry, which a restrictive network blocks.
+      # This job is therefore the only place the module's argument names are
+      # checked against the real provider schema.
+      - name: Validate
+        run: make tf-validate
+
   e2e:
     name: End-to-end (k3s)
     runs-on: ubuntu-latest
