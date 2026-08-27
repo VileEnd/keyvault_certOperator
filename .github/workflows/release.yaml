@@ -38,7 +38,7 @@ jobs:
     name: Publish the image, the chart and the release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # When the tag is being created there is nothing to check out by that
           # name yet, so start from the default branch -- which is the commit
@@ -117,7 +117,7 @@ jobs:
       # Same buildx + actions/cache pattern the deploy job uses, so the gate
       # stays free of third-party actions.
       - name: Cache image layers
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /tmp/.buildx-cache
           key: buildx-release-${{ runner.os }}-${{ hashFiles('go.sum', 'Dockerfile') }}
