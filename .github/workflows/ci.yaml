@@ -104,6 +104,20 @@ jobs:
             exit 1
           fi
 
+  vulncheck:
+    name: Known vulnerabilities
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/go-tools
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      # govulncheck reports only vulnerabilities in functions this code can
+      # actually reach, so it does not drown the signal in CVEs against
+      # dependency code that is linked but never called.
+      - name: Run govulncheck
+        run: make vulncheck
+
   terraform:
     name: Terraform
     runs-on: ubuntu-latest

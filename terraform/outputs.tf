@@ -35,6 +35,16 @@ output "federated_subject" {
 
 # Wired straight into helm_release.set so the ServiceAccount name cannot drift
 # from the federated credential's subject. See examples/aks.
+output "key_vault_uri" {
+  description = "Base URI of the vault the identity was granted on. Also the operator's allowlist entry."
+  value       = data.azurerm_key_vault.target.vault_uri
+}
+
+output "key_vault_secret_uri_prefix" {
+  description = "Prefix for the versionless secret URIs to paste into Application Gateway listeners."
+  value       = "${data.azurerm_key_vault.target.vault_uri}secrets/"
+}
+
 output "helm_values" {
   description = "Chart values that must match this module's output. Feed directly to helm_release."
   value = {
@@ -42,6 +52,11 @@ output "helm_values" {
     "azure.tenantId"        = azurerm_user_assigned_identity.operator.tenant_id
     "serviceAccount.name"   = var.service_account_name
     "serviceAccount.create" = "true"
+    # The vault the role assignment above was scoped to. Passing it through
+    # means the Azure grant and the operator's own bound come from one source
+    # and cannot disagree: a resource naming any other vault fails immediately
+    # as a configuration error rather than as a 403 the operator keeps retrying.
+    "azure.allowedVaults[0]" = data.azurerm_key_vault.target.vault_uri
   }
 }
 

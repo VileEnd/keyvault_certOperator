@@ -47,6 +47,9 @@ spec:
         args:
         - --health-probe-bind-address=:8081
         - --azure-credential={{ .Values.azure.credentialMode }}
+        {{- with .Values.azure.allowedVaults }}
+        - --allowed-vaults={{ join "," . }}
+        {{- end }}
         {{- if .Values.leaderElection.enabled }}
         - --leader-elect
         {{- end }}

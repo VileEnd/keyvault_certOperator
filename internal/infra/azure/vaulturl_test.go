@@ -66,3 +66,60 @@ func TestVaultURLProducesAUsableSecretIdentifier(t *testing.T) {
 		t.Errorf("secret identifier = %q, want %q", got, want)
 	}
 }
+
+// The field's only schema constraint is ^https://.+$, so without a host check
+// anyone able to write the resource could aim the operator's Key Vault client
+// at a host of their choosing.
+func TestVaultURLRejectsHostsThatAreNotKeyVaults(t *testing.T) {
+	t.Parallel()
+	for _, target := range []string{
+		"https://attacker.example.com",
+		"https://10.0.0.5:8443/anything",
+		"https://vault.azure.net",            // the bare suffix is not a vault
+		"https://notvault.azure.net.evil.io", // suffix must be a real label boundary
+	} {
+		if got, err := azure.VaultURL(target, azure.CloudPublic); err == nil {
+			t.Errorf("VaultURL(%q) = %q, want an error", target, got)
+		}
+	}
+}
+
+func TestVaultURLAcceptsEveryCloudsVaultHost(t *testing.T) {
+	t.Parallel()
+	// Accepted regardless of the cloud argument: cloud describes how a bare
+	// name is resolved and is not necessarily set alongside an explicit URL.
+	for _, target := range []string{
+		"https://v.vault.azure.net",
+		"https://v.vault.usgovcloudapi.net",
+		"https://v.vault.azure.cn",
+		// Private endpoints are addressed through the privatelink zone, which
+		// is a different host from the public one -- not merely a different IP.
+		"https://v.privatelink.vaultcore.azure.net",
+		"https://v.privatelink.vaultcore.usgovcloudapi.net",
+		"https://v.privatelink.vaultcore.azure.cn",
+	} {
+		if _, err := azure.VaultURL(target, azure.CloudPublic); err != nil {
+			t.Errorf("VaultURL(%q) returned %v, want it accepted", target, err)
+		}
+	}
+}
+
+func TestVaultNameRulesMatchAzure(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{
+		"9abc", // must begin with a letter
+		"a--b", // no consecutive hyphens
+		"ab",   // too short
+		"-abc", // must begin with a letter
+		"abc-", // must end with a letter or digit
+	} {
+		if got, err := azure.VaultURL(name, azure.CloudPublic); err == nil {
+			t.Errorf("VaultURL(%q) = %q, want an error", name, got)
+		}
+	}
+	for _, name := range []string{"abc", "a-b-c", "my-vault9"} {
+		if _, err := azure.VaultURL(name, azure.CloudPublic); err != nil {
+			t.Errorf("VaultURL(%q) returned %v, want it accepted", name, err)
+		}
+	}
+}

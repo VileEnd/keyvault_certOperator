@@ -351,3 +351,57 @@ func TestSyncControllerDeletionLeavesTheKeyVaultCertificateAlone(t *testing.T) {
 		t.Error("the Key Vault certificate was removed on deletion; it must be left in place")
 	}
 }
+
+// A vault outside the allowlist has to fail immediately as configuration.
+// Azure would refuse the write anyway, but that arrives as a 403 the controller
+// classifies as retryable -- so it would back off forever against something
+// that can never succeed, having first opened a connection to a host chosen by
+// whoever wrote the resource.
+func TestSyncControllerRefusesAVaultOutsideTheAllowlist(t *testing.T) {
+	requireEnvtest(t)
+	ctx := t.Context()
+	const namespace = "sync-disallowed-vault"
+
+	if err := k8sClient.Create(ctx, newNamespace(namespace)); err != nil {
+		t.Fatalf("creating namespace: %v", err)
+	}
+
+	root := testutil.NewRootCA(t, "test root")
+	leaf := root.Issue(t, testutil.LeafOptions{DNSNames: []string{"*.elsewhere.com"}})
+	if err := k8sClient.Create(ctx, newTLSSecret(t, namespace, "elsewhere-tls", leaf)); err != nil {
+		t.Fatalf("creating secret: %v", err)
+	}
+
+	sync := &v1alpha1.KeyVaultCertificateSync{
+		ObjectMeta: metav1.ObjectMeta{Name: "elsewhere", Namespace: namespace},
+		Spec: v1alpha1.KeyVaultCertificateSyncSpec{
+			Source: v1alpha1.CertificateSourceSpec{SecretRef: v1alpha1.LocalSecretReference{Name: "elsewhere-tls"}},
+			KeyVault: v1alpha1.KeyVaultSpec{
+				Name:            "someone-elses-vault",
+				CertificateName: "wildcard-elsewhere-com",
+			},
+		},
+	}
+	if err := k8sClient.Create(ctx, sync); err != nil {
+		t.Fatalf("creating sync: %v", err)
+	}
+
+	eventually(t, 30*time.Second, func() error {
+		var got v1alpha1.KeyVaultCertificateSync
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(sync), &got); err != nil {
+			return err
+		}
+		condition := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+		if condition == nil || condition.Status != metav1.ConditionFalse {
+			return fmt.Errorf("Ready condition = %+v, want False", condition)
+		}
+		if condition.Reason != "ConfigInvalid" {
+			return fmt.Errorf("reason = %q, want ConfigInvalid -- a disallowed vault is configuration, not a transient fault", condition.Reason)
+		}
+		return nil
+	})
+
+	if count := testVault.importCount("wildcard-elsewhere-com"); count != 0 {
+		t.Errorf("imports = %d, want 0 -- a disallowed vault must never be written to", count)
+	}
+}

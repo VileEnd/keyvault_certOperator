@@ -13,6 +13,7 @@ HELM_VERSION ?= v3.19.0
 # Terraform is no longer present on the GitHub runner image, so CI installs it
 # the same way a developer machine does.
 TERRAFORM_VERSION ?= 1.14.3
+GOVULNCHECK_VERSION ?= v1.7.0
 # Pinned so CI and a developer machine run the same Kubernetes, and so the
 # download is reproducible rather than whatever get.k3s.io serves today.
 K3S_VERSION ?= v1.36.3+k3s1
@@ -23,6 +24,7 @@ ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
 HELM ?= $(LOCALBIN)/helm
 TERRAFORM ?= $(LOCALBIN)/terraform
+GOVULNCHECK ?= $(LOCALBIN)/govulncheck
 
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
@@ -152,6 +154,14 @@ golangci-lint: $(LOCALBIN)
 .PHONY: kustomize
 kustomize: $(LOCALBIN)
 	@test -x $(LOCALBIN)/kustomize || GOBIN=$(LOCALBIN) go install sigs.k8s.io/kustomize/kustomize/v5@$(KUSTOMIZE_VERSION)
+
+.PHONY: govulncheck
+govulncheck: $(LOCALBIN)
+	@test -x $(GOVULNCHECK) || GOBIN=$(LOCALBIN) go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+
+.PHONY: vulncheck
+vulncheck: govulncheck ## Report known vulnerabilities reachable from this code.
+	$(GOVULNCHECK) ./...
 
 .PHONY: terraform
 terraform: $(LOCALBIN)

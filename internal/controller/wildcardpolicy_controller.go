@@ -51,6 +51,11 @@ type WildcardCertificatePolicyReconciler struct {
 	HTTPRoutesAvailable bool
 	// GatewaysAvailable records the same for the Gateway kind.
 	GatewaysAvailable bool
+
+	// AllowedVaults bounds which Key Vaults this operator may write to. Empty
+	// permits every vault, which is the behaviour that existed before the flag
+	// and stays the default so an upgrade changes nothing on its own.
+	AllowedVaults domain.VaultAllowlist
 }
 
 // +kubebuilder:rbac:groups=certsync.vileend.io,resources=wildcardcertificatepolicies,verbs=get;list;watch;create;update;patch;delete
@@ -163,6 +168,13 @@ func (r *WildcardCertificatePolicyReconciler) plan(
 	vaultURL, err := azure.VaultURL(vaultTarget(policy.Spec.KeyVault), azure.Cloud(policy.Spec.KeyVault.Cloud))
 	if err != nil {
 		return app.DesiredState{}, fmt.Errorf("%w: %w", domain.ErrInvalidVaultName, err)
+	}
+	// Checked here as well as in the sync controller. Without it a policy would
+	// happily issue certificates and generate sync resources that can only ever
+	// fail, spending Let's Encrypt rate limit on a vault it may not write to.
+	if !r.AllowedVaults.Permits(vaultURL) {
+		return app.DesiredState{}, fmt.Errorf("%w: %q is not one of [%s]",
+			domain.ErrVaultNotAllowed, vaultURL, r.AllowedVaults)
 	}
 
 	discovery := policy.Spec.Discovery

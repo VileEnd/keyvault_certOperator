@@ -10,5 +10,5 @@ output "federated_subject" {
 
 output "key_vault_secret_uri_prefix" {
   description = "Prefix for the versionless secret URIs to paste into Application Gateway listeners."
-  value       = "${data.azurerm_key_vault.this.vault_uri}secrets/"
+  value       = module.certoperator_identity.key_vault_secret_uri_prefix
 }
