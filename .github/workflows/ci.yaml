@@ -104,6 +104,27 @@ jobs:
             exit 1
           fi
 
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Terraform ships on the runner image, so no install step and no
+      # third-party action. init needs the registry, which is why validate
+      # cannot run on a developer machine behind a restrictive proxy -- this
+      # job is the only place the module's argument names are checked against
+      # the real provider schema.
+      - name: Format
+        run: terraform fmt -check -recursive terraform/
+      - name: Validate the module
+        run: |
+          terraform -chdir=terraform init -backend=false -input=false
+          terraform -chdir=terraform validate
+      - name: Validate the example
+        run: |
+          terraform -chdir=terraform/examples/aks init -backend=false -input=false
+          terraform -chdir=terraform/examples/aks validate
+
   e2e:
     name: End-to-end (k3s)
     runs-on: ubuntu-latest

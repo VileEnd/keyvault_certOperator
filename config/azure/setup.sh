@@ -20,7 +20,17 @@ set -euo pipefail
 
 IDENTITY_NAME="${IDENTITY_NAME:-keyvault-certoperator}"
 OPERATOR_NAMESPACE="${OPERATOR_NAMESPACE:-keyvault-certoperator-system}"
-SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-keyvault-certoperator-controller-manager}"
+# The federated credential matches this as a literal string, so it has to be
+# the name that actually exists in the cluster. The two install paths do not
+# agree: the Helm chart names the ServiceAccount after the release, while the
+# kustomize manifests under config/ prefix it with "-controller-manager".
+#
+# The default below is the Helm name, because the Helm command this script
+# prints is what most people run. It is passed to that command explicitly, so
+# the two cannot drift. Override it for the kustomize path:
+#
+#   SERVICE_ACCOUNT=keyvault-certoperator-controller-manager
+SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-keyvault-certoperator}"
 # Set USE_CUSTOM_ROLE=1 to use the narrower import-only role from
 # keyvault-import-only-role.json instead of the built-in officer role.
 USE_CUSTOM_ROLE="${USE_CUSTOM_ROLE:-0}"
@@ -97,7 +107,19 @@ Helm:
   helm upgrade --install keyvault-certoperator ./charts/keyvault-certoperator \\
     --namespace ${OPERATOR_NAMESPACE} --create-namespace \\
     --set azure.clientId=${CLIENT_ID} \\
-    --set azure.tenantId=${TENANT_ID}
+    --set azure.tenantId=${TENANT_ID} \\
+    --set serviceAccount.name=${SERVICE_ACCOUNT}
+
+The ServiceAccount name is pinned above on purpose. The federated credential
+matches the subject
+
+  system:serviceaccount:${OPERATOR_NAMESPACE}:${SERVICE_ACCOUNT}
+
+as a literal string, and a mismatch fails at token exchange with AADSTS70021,
+which reports no matching federated identity record and never mentions that a
+name is wrong. If you install some other way, confirm with:
+
+  kubectl get sa -n ${OPERATOR_NAMESPACE}
 
 Still to do, for Application Gateway:
 

@@ -72,29 +72,58 @@ to serve, so no pod, Service, backend or Ingress is involved in issuance.
 
 ## Quick start
 
+Full setup guide, including troubleshooting: **[docs/azure-setup.md](docs/azure-setup.md)**.
+
 ### 1. Azure
+
+**Terraform** ([module reference](terraform/), [complete example](terraform/examples/aks)):
+
+```hcl
+module "certoperator_identity" {
+  source = "github.com/VileEnd/keyvault_certOperator//terraform"
+
+  resource_group_name = "my-rg"
+  location            = "westeurope"
+  key_vault_id        = data.azurerm_key_vault.this.id
+  oidc_issuer_url     = data.azurerm_kubernetes_cluster.this.oidc_issuer_url
+}
+```
+
+**Or the Azure CLI:**
 
 ```bash
 export SUBSCRIPTION_ID=... RESOURCE_GROUP=... CLUSTER_NAME=... KEYVAULT_NAME=...
 ./config/azure/setup.sh
 ```
 
-This enables the AKS OIDC issuer and workload identity, creates a user-assigned
-managed identity, federates it to the operator's ServiceAccount, and grants it
-**Key Vault Certificates Officer** scoped to the vault only. Set
-`USE_CUSTOM_ROLE=1` to use the narrower import-only role in
-`config/azure/keyvault-import-only-role.json` instead — the built-in officer role
-also permits delete and purge, and there is no built-in import-only role.
+Either way you get a user-assigned managed identity, federated to the operator's
+ServiceAccount, holding **Key Vault Certificates Officer** scoped to the vault
+only. Set `USE_CUSTOM_ROLE=1` (or `use_import_only_role = true`) for the
+narrower import-only role in `config/azure/keyvault-import-only-role.json` — the
+built-in officer role also permits delete and purge, and there is no built-in
+import-only role.
+
+The cluster needs `oidc_issuer_enabled` **and** `workload_identity_enabled`, and
+the vault needs RBAC authorization rather than access policies. Neither is a
+default.
 
 ### 2. Install
 
 ```bash
 helm upgrade --install keyvault-certoperator ./charts/keyvault-certoperator \
   --namespace keyvault-certoperator-system --create-namespace \
-  --set azure.clientId=<managed-identity-client-id>
+  --set azure.clientId=<managed-identity-client-id> \
+  --set serviceAccount.name=keyvault-certoperator
 ```
 
 Or with kustomize: `make deploy IMG=<your-image>`.
+
+> **Pin the ServiceAccount name.** The federated credential matches
+> `system:serviceaccount:<ns>:<name>` as a literal string, and the two install
+> paths disagree: Helm names it after the release, kustomize appends
+> `-controller-manager`. A mismatch fails at token exchange with AADSTS70021,
+> which never mentions that a name is wrong. The Terraform module's `helm_values`
+> output wires this for you.
 
 ### 3. Declare a policy
 
