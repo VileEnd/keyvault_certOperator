@@ -1,0 +1,48 @@
+name: Go and pinned tools
+description: >
+  Sets up Go and restores the tool binaries the Makefile pins into ./bin.
+  Every Makefile tool target is guarded by `test -x`, so a restored cache makes
+  them no-ops -- which is where most of this pipeline's time used to go:
+  golangci-lint and helm are compiled from source, and controller-gen is built
+  by four separate jobs.
+
+  The cache key includes the job id on purpose. Jobs install different subsets
+  of the tools, so one shared key would let whichever job finished first store a
+  bin/ holding only its own tools, and every other job would restore that and
+  rebuild what was missing.
+
+inputs:
+  go-version:
+    description: Go version to set up.
+    required: true
+  lint-cache:
+    description: Also restore golangci-lint's analysis cache. Only the lint job needs it.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v5
+      with:
+        go-version: ${{ inputs.go-version }}
+        cache: true
+
+    # Keyed on the Makefile because that is where every tool version is pinned,
+    # so a version bump invalidates the cache by construction rather than by
+    # someone remembering to bump a key. envtest's Kubernetes binaries live in
+    # bin/k8s and are covered by the same entry.
+    - uses: actions/cache@v4
+      with:
+        path: bin
+        key: tools-${{ github.job }}-${{ runner.os }}-go${{ inputs.go-version }}-${{ hashFiles('Makefile') }}
+        restore-keys: |
+          tools-${{ github.job }}-${{ runner.os }}-go${{ inputs.go-version }}-
+
+    - if: inputs.lint-cache == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/golangci-lint
+        key: golangci-${{ runner.os }}-${{ hashFiles('.golangci.yml', 'go.sum') }}
+        restore-keys: |
+          golangci-${{ runner.os }}-

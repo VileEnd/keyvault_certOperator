@@ -8,11 +8,17 @@ CONTROLLER_TOOLS_VERSION ?= v0.21.0
 ENVTEST_VERSION ?= v0.24.1
 ENVTEST_K8S_VERSION ?= 1.36
 GOLANGCI_LINT_VERSION ?= v2.13.1
+KUSTOMIZE_VERSION ?= v5.8.1
+HELM_VERSION ?= v3.19.0
+# Pinned so CI and a developer machine run the same Kubernetes, and so the
+# download is reproducible rather than whatever get.k3s.io serves today.
+K3S_VERSION ?= v1.36.3+k3s1
 
 LOCALBIN ?= $(shell pwd)/bin
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
+HELM ?= $(LOCALBIN)/helm
 
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
@@ -141,7 +147,15 @@ golangci-lint: $(LOCALBIN)
 
 .PHONY: kustomize
 kustomize: $(LOCALBIN)
-	@test -x $(LOCALBIN)/kustomize || GOBIN=$(LOCALBIN) go install sigs.k8s.io/kustomize/kustomize/v5@latest
+	@test -x $(LOCALBIN)/kustomize || GOBIN=$(LOCALBIN) go install sigs.k8s.io/kustomize/kustomize/v5@$(KUSTOMIZE_VERSION)
+
+.PHONY: print-k3s-version
+print-k3s-version: ## Print the pinned k3s version, so CI installs what the Makefile says.
+	@echo $(K3S_VERSION)
+
+.PHONY: helm
+helm: $(LOCALBIN)
+	@test -x $(HELM) || GOBIN=$(LOCALBIN) go install helm.sh/helm/v3/cmd/helm@$(HELM_VERSION)
 
 ##@ Helm
 
@@ -158,9 +172,9 @@ check-helm-crds: helm-crds ## Fail if the chart's CRDs are stale.
 	fi
 
 .PHONY: helm-lint
-helm-lint: ## Lint and render the chart.
-	helm lint charts/keyvault-certoperator --set azure.clientId=00000000-0000-0000-0000-000000000000
-	helm template ci charts/keyvault-certoperator --set azure.clientId=00000000-0000-0000-0000-000000000000 > /dev/null
+helm-lint: helm ## Lint and render the chart.
+	$(HELM) lint charts/keyvault-certoperator --set azure.clientId=00000000-0000-0000-0000-000000000000
+	$(HELM) template ci charts/keyvault-certoperator --set azure.clientId=00000000-0000-0000-0000-000000000000 > /dev/null
 
 ##@ End-to-end
 

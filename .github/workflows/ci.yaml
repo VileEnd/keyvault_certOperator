@@ -3,14 +3,20 @@ name: CI
 on:
   push:
     branches: ["main"]
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
   pull_request:
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Both halves resolve to the bare branch name. github.ref does not: a
+  # pull_request run sees refs/pull/N/merge while a workflow_dispatch of the
+  # same branch sees refs/heads/<branch>, so they landed in different groups and
+  # the whole suite ran twice for one commit.
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 env:
@@ -19,29 +25,15 @@ env:
   GO_VERSION: "1.26"
 
 jobs:
-  build:
-    name: Build and vet
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-      - run: go build ./...
-      - run: go vet ./...
-      # The end-to-end suite is behind a build tag, so vet it explicitly.
-      - run: go vet -tags e2e ./test/...
-
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: ./.github/actions/go-tools
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
+          lint-cache: "true"
       # Installed from the version pinned in the Makefile rather than a
       # third-party action, so CI and a developer machine run the same linter.
       - run: make lint
@@ -51,12 +43,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: ./.github/actions/go-tools
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
+      # make test runs go vet as a prerequisite. These two add what it does not
+      # cover, and run here rather than in a job of their own because the
+      # dependency graph is already compiled by this point.
       - name: Test
         run: make test
+      - run: go build ./...
+      # The end-to-end suite is behind a build tag, so vet it explicitly.
+      - run: go vet -tags e2e ./test/...
       - name: Upload coverage
         if: always()
         uses: actions/upload-artifact@v4
@@ -70,10 +67,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: ./.github/actions/go-tools
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
       # Fails if the CRDs, RBAC or deepcopy code drift from the Go markers, or if
       # the chart's copy of the CRDs is stale.
       - run: make check-manifests
@@ -84,15 +80,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: ./.github/actions/go-tools
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
-      - name: Install Helm
-        run: go install helm.sh/helm/v3/cmd/helm@v3.19.0
       - name: Lint and render
         run: |
-          export PATH="$(go env GOPATH)/bin:$PATH"
+          make helm
+          export PATH="$PWD/bin:$PATH"
           helm lint charts/keyvault-certoperator --set azure.clientId=00000000-0000-0000-0000-000000000000
           helm template ci charts/keyvault-certoperator \
             --set azure.clientId=00000000-0000-0000-0000-000000000000 > /dev/null
@@ -104,7 +98,7 @@ jobs:
             --set watchNamespaces="{cert-system}" > /dev/null
       - name: Refuse to render without an identity
         run: |
-          export PATH="$(go env GOPATH)/bin:$PATH"
+          export PATH="$PWD/bin:$PATH"
           if helm template ci charts/keyvault-certoperator > /dev/null 2>&1; then
             echo "the chart rendered without azure.clientId; the guard is broken"
             exit 1
@@ -115,13 +109,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: ./.github/actions/go-tools
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
       - name: Start k3s
         run: |
-          curl -sfL https://get.k3s.io | sudo sh -s - \
+          curl -sfL https://get.k3s.io \
+            | sudo INSTALL_K3S_VERSION="$(make -s print-k3s-version)" sh -s - \
             --disable traefik --disable metrics-server --disable local-storage \
             --disable servicelb --write-kubeconfig-mode 644
       - name: Wait for the node to be ready
@@ -169,13 +163,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: ./.github/actions/go-tools
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
       - name: Start k3s
         run: |
-          curl -sfL https://get.k3s.io | sudo sh -s - \
+          curl -sfL https://get.k3s.io \
+            | sudo INSTALL_K3S_VERSION="$(make -s print-k3s-version)" sh -s - \
             --disable traefik --disable metrics-server --disable local-storage \
             --disable servicelb --write-kubeconfig-mode 644
       - name: Wait for the node to be ready
@@ -218,29 +212,40 @@ jobs:
           kubectl get keyvaultcertificatesyncs -A -o yaml || true
           kubectl logs -n cert-manager deployment/cert-manager --tail=100 || true
 
-  image:
-    name: Container image builds
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # Plain docker build: the runner already has Docker, and this keeps the
-      # gate free of third-party actions.
-      - run: docker build -t keyvault-certoperator:ci .
-
   deploy:
     name: Deploys and runs in-cluster
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: ./.github/actions/go-tools
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
+      # buildx with a layer cache, so an unchanged go.sum skips `go mod
+      # download` inside the image. Still a first-party-actions-only gate:
+      # buildx ships with the runner and the cache is actions/cache.
+      - name: Cache image layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: buildx-${{ runner.os }}-${{ hashFiles('go.sum', 'Dockerfile') }}-${{ github.sha }}
+          restore-keys: |
+            buildx-${{ runner.os }}-${{ hashFiles('go.sum', 'Dockerfile') }}-
+            buildx-${{ runner.os }}-
       - name: Build the image
-        run: docker build -t keyvault-certoperator:ci .
+        run: |
+          # The default docker driver cannot export a cache; docker-container can.
+          docker buildx create --name ci --driver docker-container --use 2>/dev/null \
+            || docker buildx use ci
+          docker buildx build --load -t keyvault-certoperator:ci \
+            --cache-from type=local,src=/tmp/.buildx-cache \
+            --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max .
+          # buildx cannot write to the directory it is reading; rotate it.
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
       - name: Start k3s
         run: |
-          curl -sfL https://get.k3s.io | sudo sh -s - \
+          curl -sfL https://get.k3s.io \
+            | sudo INSTALL_K3S_VERSION="$(make -s print-k3s-version)" sh -s - \
             --disable traefik --disable metrics-server --disable local-storage \
             --disable servicelb --write-kubeconfig-mode 644
       - name: Wait for the node to be ready
@@ -253,8 +258,6 @@ jobs:
           done
       - name: Load the image into k3s
         run: docker save keyvault-certoperator:ci | sudo k3s ctr images import -
-      - name: Install Helm
-        run: go install helm.sh/helm/v3/cmd/helm@v3.19.0
       # The Azure Workload Identity webhook is not installed on this cluster, so
       # the AZURE_* variables it would inject are supplied by hand. The
       # credential constructor only checks that they are present -- it never
@@ -264,7 +267,8 @@ jobs:
         env:
           KUBECONFIG: /etc/rancher/k3s/k3s.yaml
         run: |
-          export PATH="$(go env GOPATH)/bin:$PATH"
+          make helm
+          export PATH="$PWD/bin:$PATH"
           helm upgrade --install keyvault-certoperator ./charts/keyvault-certoperator \
             --namespace keyvault-certoperator-system --create-namespace \
             --set image.repository=keyvault-certoperator \
