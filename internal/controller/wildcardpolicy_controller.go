@@ -192,10 +192,11 @@ func (r *WildcardCertificatePolicyReconciler) plan(
 	}
 
 	return app.NewPlanner(hosts).Plan(ctx, app.PolicySpec{
-		Zones:           policy.Spec.Zones,
-		MaxCertificates: int(policy.Spec.MaxCertificates),
-		Grouping:        domain.Grouping(policy.Spec.Grouping),
-		VaultURL:        vaultURL,
+		Zones:              policy.Spec.Zones,
+		MaxCertificates:    int(policy.Spec.MaxCertificates),
+		Grouping:           domain.Grouping(policy.Spec.Grouping),
+		IssueZoneWildcards: policy.Spec.IssueZoneWildcards,
+		VaultURL:           vaultURL,
 	})
 }
 

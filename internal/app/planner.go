@@ -16,6 +16,8 @@ type PolicySpec struct {
 	MaxCertificates int
 	// Grouping selects how SANs are packed into certificates.
 	Grouping domain.Grouping
+	// IssueZoneWildcards plans "*.zone" for every zone regardless of discovery.
+	IssueZoneWildcards bool
 	// VaultURL is the Key Vault the resulting certificates are synced to.
 	VaultURL string
 }
@@ -69,10 +71,11 @@ func (p *Planner) Plan(ctx context.Context, spec PolicySpec) (DesiredState, erro
 	}
 
 	plan, err := domain.BuildPlan(domain.PlanInput{
-		Hosts:           hosts,
-		Zones:           spec.Zones,
-		MaxCertificates: spec.MaxCertificates,
-		Grouping:        spec.Grouping,
+		Hosts:              hosts,
+		Zones:              spec.Zones,
+		MaxCertificates:    spec.MaxCertificates,
+		Grouping:           spec.Grouping,
+		IssueZoneWildcards: spec.IssueZoneWildcards,
 	})
 	if err != nil {
 		return DesiredState{}, err
