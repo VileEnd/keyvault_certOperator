@@ -139,6 +139,36 @@ Certificates User does not work and Secrets Officer is more than it needs. Never
 share one identity between the operator and the gateway — the operator writes
 certificates, the gateway only reads the secret behind one.
 
+### Bounding which vault the operator may write to
+
+Azure RBAC scopes what the identity *can* do. It does not scope what a cluster
+user may *ask* for: `spec.keyVault` is chosen per-resource, and `vaultURL`
+accepts any Key Vault host. Without a bound, anyone who can create a
+`KeyVaultCertificateSync` in a watched namespace can name a vault the operator
+was never granted.
+
+Azure still refuses the write, so nothing leaks — but the operator has by then
+connected to that host, and the resulting 403 looks like a transient fault, so
+it backs off against a misconfiguration that will never resolve itself.
+
+Set the allowlist to the vault the identity was actually granted:
+
+```yaml
+azure:
+  allowedVaults: ["my-vault"]
+```
+
+A resource naming any other vault then fails immediately with
+`Ready=False, Reason=ConfigInvalid`, and nothing is issued for it.
+
+The Terraform module wires this for you — `helm_values` carries the same vault
+the role assignment was scoped to, so the Azure grant and the Kubernetes bound
+come from one source and cannot disagree. Names and full URLs are equivalent,
+so `my-vault` and `https://my-vault.vault.azure.net` both work.
+
+Empty (the default) permits any vault the identity has rights on, which is the
+behaviour that existed before this setting.
+
 ### Networking
 
 If the vault has network ACLs, add the gateway's subnet **explicitly** — with
@@ -208,6 +238,12 @@ Expected. Federated identity credentials take time to propagate across a region,
 and Microsoft documents that a token request made minutes after creating one can
 fail with AADSTS70021 while caches still hold old data. The operator retries
 with backoff. Do not go looking for a misconfiguration on a brand-new identity.
+
+### A resource reports ConfigInvalid naming a vault
+
+The vault is outside `azure.allowedVaults`. Either the resource names the wrong
+vault, or the allowlist is missing one the identity legitimately holds a role
+on. The condition message names both the vault requested and the permitted set.
 
 ### Imports fail with 403 and the role assignment looks correct
 

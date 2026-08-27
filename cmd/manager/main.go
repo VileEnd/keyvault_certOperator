@@ -31,6 +31,7 @@ import (
 	"github.com/VileEnd/keyvault_certOperator/api/v1alpha1"
 	"github.com/VileEnd/keyvault_certOperator/internal/app"
 	"github.com/VileEnd/keyvault_certOperator/internal/controller"
+	"github.com/VileEnd/keyvault_certOperator/internal/domain"
 	"github.com/VileEnd/keyvault_certOperator/internal/infra/azure"
 	"github.com/VileEnd/keyvault_certOperator/internal/infra/kube"
 )
@@ -55,6 +56,7 @@ type options struct {
 	leaderElection  bool
 	watchNamespaces string
 	credentialMode  string
+	allowedVaults   string
 }
 
 func main() {
@@ -79,6 +81,11 @@ func run() error {
 		"Enable leader election, so only one replica reconciles at a time.")
 	flag.StringVar(&opts.watchNamespaces, "watch-namespaces", "",
 		"Comma-separated namespaces to restrict the cache to. Empty means all namespaces.")
+	flag.StringVar(&opts.allowedVaults, "allowed-vaults", "",
+		"Comma-separated Key Vault names or base URLs this operator may write to. "+
+			"Empty permits any vault the identity has rights on. Set this to the same "+
+			"vault the identity was granted, so a resource naming another vault fails "+
+			"fast as a configuration error instead of backing off against a 403.")
 	flag.StringVar(&opts.credentialMode, "azure-credential", string(azure.CredentialWorkloadIdentity),
 		"How to authenticate to Azure: workload-identity (default) or default (local development only).")
 
@@ -101,6 +108,16 @@ func run() error {
 	vault := azure.NewRepository(azure.NewClientFactory(credential, nil))
 	clock := app.RealClock{}
 
+	allowedVaults, err := parseAllowedVaults(opts.allowedVaults)
+	if err != nil {
+		return fmt.Errorf("parsing --allowed-vaults: %w", err)
+	}
+	if allowedVaults.Enforced() {
+		setup.Info("Key Vault writes are restricted", "allowedVaults", allowedVaults.String())
+	} else {
+		setup.Info("no --allowed-vaults set; any vault the identity has rights on may be written to")
+	}
+
 	if err := (&controller.KeyVaultCertificateSyncReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
@@ -108,6 +125,8 @@ func run() error {
 		Source:   kube.NewSecretSource(mgr.GetClient()),
 		Vault:    vault,
 		Clock:    clock,
+
+		AllowedVaults: allowedVaults,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setting up the certificate sync controller: %w", err)
 	}
@@ -151,6 +170,7 @@ func run() error {
 		Clock:               clock,
 		HTTPRoutesAvailable: httpRoutes,
 		GatewaysAvailable:   gateways,
+		AllowedVaults:       allowedVaults,
 	}).SetupWithManager(mgr, watches); err != nil {
 		return fmt.Errorf("setting up the wildcard policy controller: %w", err)
 	}
@@ -222,6 +242,26 @@ func cacheOptions(opts options) cache.Options {
 		}
 	}
 	return options
+}
+
+// parseAllowedVaults resolves each entry through the same resolver the
+// controllers use, so a bare name and its URL compare equal and an entry that
+// is not a vault at all is rejected at startup rather than silently never
+// matching anything.
+func parseAllowedVaults(value string) (domain.VaultAllowlist, error) {
+	var allowed domain.VaultAllowlist
+	for _, entry := range strings.Split(value, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		url, err := azure.VaultURL(entry, azure.CloudPublic)
+		if err != nil {
+			return nil, fmt.Errorf("%q: %w", entry, err)
+		}
+		allowed = append(allowed, url)
+	}
+	return allowed, nil
 }
 
 // crdInstalled reports whether the API server serves a given kind.

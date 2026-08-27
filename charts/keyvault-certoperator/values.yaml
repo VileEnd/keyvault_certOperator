@@ -18,6 +18,19 @@ azure:
   # workload-identity (default) or default. Use "default" only for local
   # development against a real vault; it enables the full credential chain.
   credentialMode: workload-identity
+  # Key Vault names or base URLs this operator may write to.
+  #
+  # Set this to the same vault the managed identity was granted. Without it the
+  # vault is chosen entirely by whoever writes the custom resource, and a
+  # resource naming another vault produces a 403 the operator treats as
+  # retryable -- so it backs off forever against something that will never fix
+  # itself. With it, that resource fails immediately as ConfigInvalid.
+  #
+  # Empty permits any vault the identity has rights on, which is the behaviour
+  # that existed before this value.
+  #
+  #   allowedVaults: ["my-vault"]
+  allowedVaults: []
 
 serviceAccount:
   create: true

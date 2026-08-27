@@ -169,6 +169,10 @@ func startManager(ctx context.Context, cfg *rest.Config) error {
 		Source:   kube.NewSecretSource(mgr.GetClient()),
 		Vault:    &tagRecordingVault{testVault},
 		Clock:    app.RealClock{},
+		// Every other test in this package targets my-vault, so enforcing the
+		// allowlist here means they all double as proof that a permitted vault
+		// still works.
+		AllowedVaults: domain.VaultAllowlist{"https://my-vault.vault.azure.net"},
 	}).SetupWithManager(mgr); err != nil {
 		return err
 	}
@@ -179,6 +183,7 @@ func startManager(ctx context.Context, cfg *rest.Config) error {
 		Recorder:            mgr.GetEventRecorder("test-policy"),
 		Certificates:        kube.NewCertificateWriter(mgr.GetClient(), mgr.GetRESTMapper()),
 		Clock:               app.RealClock{},
+		AllowedVaults:       domain.VaultAllowlist{"https://my-vault.vault.azure.net"},
 		HTTPRoutesAvailable: false,
 	}).SetupWithManager(mgr, []client.Object{&networkingv1.Ingress{}}); err != nil {
 		return err

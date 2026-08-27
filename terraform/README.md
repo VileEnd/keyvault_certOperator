@@ -103,6 +103,8 @@ import fails with a 403 that does not explain why.
 | `identity_id` | Identity's resource ID. |
 | `namespace` / `service_account_name` | What the credential is federated to. |
 | `federated_subject` | The literal subject string, for debugging. |
+| `key_vault_uri` | Base URI of the granted vault; also the operator's allowlist entry. |
+| `key_vault_secret_uri_prefix` | Prefix for versionless listener URIs. |
 | `helm_values` | Map to feed straight into `helm_release`. |
 | `role_assigned` | Which role was granted on the vault. |
 
@@ -122,6 +124,17 @@ backed up.
 
 The custom role needs permission to create role definitions, which not every
 pipeline identity has. That is the only reason it is not the default.
+
+## Both sides of the scoping
+
+The role assignment bounds what the identity *can* write to. It does not bound
+what a cluster user may *ask* for -- `spec.keyVault` is chosen per-resource.
+
+`helm_values` therefore also carries `azure.allowedVaults[0]`, set to the same
+vault the role assignment was scoped to. The Azure grant and the operator's own
+bound come from one source and cannot drift apart, and a resource naming any
+other vault fails immediately as a configuration error instead of as a 403 the
+operator would keep retrying.
 
 ## The failure everyone hits
 

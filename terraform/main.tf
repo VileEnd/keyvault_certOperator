@@ -7,6 +7,14 @@
 # over network_acls is worse than no module. See examples/aks for the whole
 # picture assembled from parts.
 
+# Reading the vault back gives us its URI for the allowlist, and fails the plan
+# early with a clear message if key_vault_id points at something that is not a
+# vault or is not visible to this identity.
+data "azurerm_key_vault" "target" {
+  name                = reverse(split("/", var.key_vault_id))[0]
+  resource_group_name = split("/", var.key_vault_id)[4]
+}
+
 resource "azurerm_user_assigned_identity" "operator" {
   name                = var.identity_name
   resource_group_name = var.resource_group_name

@@ -29,4 +29,11 @@ var (
 	ErrInvalidHost = errors.New("invalid hostname")
 	// ErrInvalidZone means a configured zone is unusable as an issuance boundary.
 	ErrInvalidZone = errors.New("invalid zone")
+	// ErrInvalidPKCS12Profile means the requested PKCS#12 profile is unknown.
+	// It had been reported as ErrInvalidVaultName, which put "invalid Key Vault
+	// certificate name" in front of an operator whose name was perfectly fine.
+	ErrInvalidPKCS12Profile = errors.New("invalid PKCS#12 profile")
+	// ErrVaultNotAllowed means the resource named a vault outside the operator's
+	// allowlist. It is terminal: no amount of retrying makes a vault permitted.
+	ErrVaultNotAllowed = errors.New("key vault is not in the operator's allowlist")
 )

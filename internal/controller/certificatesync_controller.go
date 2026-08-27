@@ -48,6 +48,11 @@ type KeyVaultCertificateSyncReconciler struct {
 	Source app.CertificateSource
 	Vault  app.VaultRepository
 	Clock  app.Clock
+
+	// AllowedVaults bounds which Key Vaults this operator may write to. Empty
+	// permits every vault, which is the behaviour that existed before the flag
+	// and stays the default so an upgrade changes nothing on its own.
+	AllowedVaults domain.VaultAllowlist
 }
 
 // +kubebuilder:rbac:groups=certsync.vileend.io,resources=keyvaultcertificatesyncs,verbs=get;list;watch;create;update;patch;delete
@@ -117,10 +122,14 @@ func (r *KeyVaultCertificateSyncReconciler) sync(
 	if err != nil {
 		return app.SyncOutcome{}, fmt.Errorf("%w: %w", domain.ErrInvalidVaultName, err)
 	}
+	if !r.AllowedVaults.Permits(vaultURL) {
+		return app.SyncOutcome{}, fmt.Errorf("%w: %q is not one of [%s]",
+			domain.ErrVaultNotAllowed, vaultURL, r.AllowedVaults)
+	}
 
 	encoder, err := pkcs12.NewEncoder(pkcs12Profile(sync.Spec.SyncPolicy))
 	if err != nil {
-		return app.SyncOutcome{}, fmt.Errorf("%w: %w", domain.ErrInvalidVaultName, err)
+		return app.SyncOutcome{}, fmt.Errorf("%w: %w", domain.ErrInvalidPKCS12Profile, err)
 	}
 
 	syncer := &app.Syncer{Source: r.Source, Vault: r.Vault, Encode: encoder, Clock: r.Clock}

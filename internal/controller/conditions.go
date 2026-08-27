@@ -73,8 +73,12 @@ func classify(err error) (reason string, retryable bool) {
 		errors.Is(err, domain.ErrNoDNSNames):
 		return ReasonSourceInvalid, false
 	case errors.Is(err, domain.ErrInvalidVaultName),
+		errors.Is(err, domain.ErrInvalidPKCS12Profile),
 		errors.Is(err, domain.ErrInvalidZone),
-		errors.Is(err, domain.ErrInvalidHost):
+		errors.Is(err, domain.ErrInvalidHost),
+		// Terminal on purpose: no amount of retrying makes a vault permitted,
+		// and the 403 it would otherwise produce looks retryable.
+		errors.Is(err, domain.ErrVaultNotAllowed):
 		return ReasonConfigInvalid, false
 	default:
 		return ReasonVaultError, true
