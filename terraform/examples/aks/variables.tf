@@ -30,19 +30,19 @@ variable "application_gateway_principal_id" {
 }
 
 variable "chart_repository" {
-  description = "Helm repository hosting the chart. Use null with a local path in chart_name."
+  description = "Helm repository hosting the chart. Set to null and put a local path in chart_name to install from a clone."
   type        = string
-  default     = null
+  default     = "oci://ghcr.io/vileend/charts"
 }
 
 variable "chart_name" {
   description = "Chart name, or a local path such as ../../../charts/keyvault-certoperator."
   type        = string
-  default     = "../../../charts/keyvault-certoperator"
+  default     = "keyvault-certoperator"
 }
 
 variable "chart_version" {
   description = "Chart version. Null tracks whatever the repository serves, which is not what you want in production."
   type        = string
-  default     = null
+  default     = "0.1.0"
 }
