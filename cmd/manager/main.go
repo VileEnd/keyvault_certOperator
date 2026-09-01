@@ -133,9 +133,12 @@ func run() error {
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorder("keyvaultcertificatesync"),
-		Source:   kube.NewSecretSource(mgr.GetClient()),
-		Vault:    vault,
-		Clock:    clock,
+		// The cached reader sees only labelled Secrets, by design; the API
+		// reader is handed over so that a miss can be explained as "unlabelled"
+		// rather than reported as "does not exist".
+		Source: kube.NewSecretSource(mgr.GetClient()).WithVisibilityProbe(mgr.GetAPIReader()),
+		Vault:  vault,
+		Clock:  clock,
 
 		Cloud:         cloud,
 		AllowedVaults: allowedVaults,

@@ -36,4 +36,22 @@ var (
 	// ErrVaultNotAllowed means the resource named a vault outside the operator's
 	// allowlist. It is terminal: no amount of retrying makes a vault permitted.
 	ErrVaultNotAllowed = errors.New("key vault is not in the operator's allowlist")
+	// ErrVaultAccessDenied means Key Vault refused the call on authorization
+	// grounds. It is terminal: a permission that was never granted is not going
+	// to appear on the next attempt, and reporting it as an ordinary vault fault
+	// is what made a missing grant indistinguishable from throttling.
+	ErrVaultAccessDenied = errors.New("key vault denied access")
+	// ErrInvalidSourceSecret means the source Secret is not a usable
+	// kubernetes.io/tls Secret: wrong type, or no tls.crt or tls.key. The fix is
+	// in the cluster, so this must not be reported as a Key Vault problem.
+	ErrInvalidSourceSecret = errors.New("source secret is not a usable TLS secret")
+	// ErrSourceSecretNotVisible means the Secret exists but does not carry the
+	// managed label, so it is outside the operator's Secret cache. It is a
+	// separate error from "not found" because the two need opposite fixes and
+	// only the operator can tell them apart.
+	ErrSourceSecretNotVisible = errors.New("source secret is outside the operator's cache")
+	// ErrPKCS12Encoding means the bundle could not be encoded into the PFX Key
+	// Vault imports. Nothing has reached Azure at that point, so the vault is
+	// the one component this failure says nothing about.
+	ErrPKCS12Encoding = errors.New("encoding the PKCS#12 payload failed")
 )

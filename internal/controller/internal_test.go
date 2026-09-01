@@ -54,6 +54,33 @@ func TestClassify(t *testing.T) {
 		{"invalid zone", domain.ErrInvalidZone, ReasonConfigInvalid, false},
 		{"invalid host", domain.ErrInvalidHost, ReasonConfigInvalid, false},
 		{
+			// The Secret is in the cluster; only the label is missing. Reporting
+			// SourceNotFound would deny an object kubectl plainly shows.
+			name:       "source secret present but unlabelled",
+			err:        fmt.Errorf("loading: %w", domain.ErrSourceSecretNotVisible),
+			wantReason: ReasonSourceSecretNotVisible,
+		},
+		{
+			// Wrong Secret type or a missing tls.crt is a cluster problem, and
+			// naming the vault for it sends people to the Azure portal.
+			name:       "unusable source secret",
+			err:        fmt.Errorf("loading: %w", domain.ErrInvalidSourceSecret),
+			wantReason: ReasonSourceInvalid,
+		},
+		{
+			// Fails before a single byte reaches Azure.
+			name:       "pkcs12 encoding",
+			err:        fmt.Errorf("x: %w", domain.ErrPKCS12Encoding),
+			wantReason: ReasonEncodingFailed,
+		},
+		{
+			// The distinction this whole table exists for: a 403 is permanent,
+			// and retried on backoff it is indistinguishable from throttling.
+			name:       "vault access denied",
+			err:        fmt.Errorf("reading wildcard-x-com: %w", domain.ErrVaultAccessDenied),
+			wantReason: ReasonVaultAccessDenied,
+		},
+		{
 			// Key Vault throttling, an API server hiccup, a network blip.
 			name:          "transient",
 			err:           errors.New("key vault returned 503"),

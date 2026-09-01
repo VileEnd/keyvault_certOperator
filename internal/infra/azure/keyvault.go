@@ -62,6 +62,9 @@ func (r *Repository) Snapshot(ctx context.Context, ref app.VaultRef) (domain.Vau
 		if isNotFound(err) {
 			return domain.VaultSnapshot{Exists: false}, nil
 		}
+		if isAccessDenied(err) {
+			return domain.VaultSnapshot{}, accessDenied(ref, "reading", "get", err)
+		}
 		return domain.VaultSnapshot{}, fmt.Errorf("getting certificate %q: %w", ref.CertificateName, err)
 	}
 
@@ -115,6 +118,9 @@ func (r *Repository) Import(ctx context.Context, ref app.VaultRef, req app.Impor
 
 	resp, err := client.ImportCertificate(ctx, ref.CertificateName, params, nil)
 	if err != nil {
+		if isAccessDenied(err) {
+			return app.ImportResult{}, accessDenied(ref, "importing", "import", err)
+		}
 		return app.ImportResult{}, fmt.Errorf("importing certificate %q: %w", ref.CertificateName, err)
 	}
 
@@ -145,6 +151,37 @@ func (r *Repository) clientFor(vaultURL string) (*azcertificates.Client, error) 
 func isNotFound(err error) bool {
 	var respErr *azcore.ResponseError
 	return errors.As(err, &respErr) && respErr.StatusCode == http.StatusNotFound
+}
+
+// isAccessDenied reports whether the vault refused the call on authorization
+// grounds rather than transiently.
+//
+// 401 counts alongside 403 because Key Vault answers a token it will not accept
+// with 401, and the repair is the same permanent one. This looks at the vault's
+// own response only: a credential that never produced a token fails earlier, in
+// azidentity, and stays an ordinary retryable error -- one round of AAD
+// unavailability should not be reported as a missing permission.
+func isAccessDenied(err error) bool {
+	var respErr *azcore.ResponseError
+	if !errors.As(err, &respErr) {
+		return false
+	}
+	return respErr.StatusCode == http.StatusForbidden || respErr.StatusCode == http.StatusUnauthorized
+}
+
+// accessDenied names the two grants a 401 or 403 can be missing, because the
+// vault itself reports neither.
+//
+// The access-policy half is the one worth spelling out: on a vault with
+// enableRbacAuthorization=false, a role assignment is accepted by ARM, shows up
+// correctly in the portal, and grants precisely nothing -- which is why this
+// failure is so often chased as a transient fault.
+func accessDenied(ref app.VaultRef, action, permission string, err error) error {
+	return fmt.Errorf("%w: %s %q in %s requires the certificates/%s permission; "+
+		"grant it as a certificate access policy when the vault has "+
+		"enableRbacAuthorization=false, where role assignments are ignored, and as a "+
+		"Key Vault Certificates Officer role assignment when it is true: %w",
+		domain.ErrVaultAccessDenied, action, ref.CertificateName, ref.VaultURL, permission, err)
 }
 
 func toAzureTags(tags map[string]string) map[string]*string {

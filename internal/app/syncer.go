@@ -115,7 +115,10 @@ func (s *Syncer) Sync(ctx context.Context, req SyncRequest) (SyncOutcome, error)
 
 	blob, password, err := s.Encode.Encode(bundle)
 	if err != nil {
-		return SyncOutcome{}, fmt.Errorf("encoding certificate: %w", err)
+		// Sentinel-wrapped because this happens entirely in this process, before
+		// anything is sent: without it the status blames Key Vault for a payload
+		// the vault has never seen.
+		return SyncOutcome{}, fmt.Errorf("%w: %w", domain.ErrPKCS12Encoding, err)
 	}
 
 	result, err := s.Vault.Import(ctx, req.Vault, ImportRequest{

@@ -166,9 +166,12 @@ func startManager(ctx context.Context, cfg *rest.Config) error {
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorder("test-sync"),
-		Source:   kube.NewSecretSource(mgr.GetClient()),
-		Vault:    &tagRecordingVault{testVault},
-		Clock:    app.RealClock{},
+		// Mirrors production: the cached reader is label-selected, the API
+		// reader is not, which is what lets an unlabelled Secret be named as
+		// such instead of reported missing.
+		Source: kube.NewSecretSource(mgr.GetClient()).WithVisibilityProbe(mgr.GetAPIReader()),
+		Vault:  &tagRecordingVault{testVault},
+		Clock:  app.RealClock{},
 		// Every other test in this package targets my-vault, so enforcing the
 		// allowlist here means they all double as proof that a permitted vault
 		// still works.

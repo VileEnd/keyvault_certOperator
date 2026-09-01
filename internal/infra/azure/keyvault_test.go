@@ -2,7 +2,9 @@ package azure_test
 
 import (
 	"encoding/base64"
+	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,6 +56,57 @@ func TestSnapshotTreatsAMissingCertificateAsAbsent(t *testing.T) {
 	}
 	if snapshot.Exists {
 		t.Error("expected Exists to be false for a missing certificate")
+	}
+}
+
+func TestAuthorizationFailuresAreNamedAsPermissionProblems(t *testing.T) {
+	t.Parallel()
+	// The failure the operator could not previously describe. Both verbs are
+	// covered because they need different permissions and an access-policy vault
+	// commonly grants one and not the other, so a vault that reads fine can
+	// still refuse every import.
+	statuses := map[string]int{
+		"forbidden":    http.StatusForbidden,
+		"unauthorized": http.StatusUnauthorized,
+	}
+
+	for name, status := range statuses {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			server := &fake.Server{
+				GetCertificate: func(_ testContext, _, _ string, _ *azcertificates.GetCertificateOptions) (
+					resp azfake.Responder[azcertificates.GetCertificateResponse], errResp azfake.ErrorResponder) {
+					errResp.SetResponseError(status, "Forbidden")
+					return
+				},
+				ImportCertificate: func(_ testContext, _ string, _ azcertificates.ImportCertificateParameters,
+					_ *azcertificates.ImportCertificateOptions) (
+					resp azfake.Responder[azcertificates.ImportCertificateResponse], errResp azfake.ErrorResponder) {
+					errResp.SetResponseError(status, "Forbidden")
+					return
+				},
+			}
+			repository := newRepository(t, server)
+
+			_, readErr := repository.Snapshot(t.Context(), testRef())
+			_, importErr := repository.Import(t.Context(), testRef(), app.ImportRequest{
+				Blob: []byte("pretend-pfx"), ContentType: app.ContentTypePKCS12,
+			})
+
+			for verb, err := range map[string]error{"Snapshot": readErr, "Import": importErr} {
+				if !errors.Is(err, domain.ErrVaultAccessDenied) {
+					t.Errorf("%s error = %v, want it to wrap ErrVaultAccessDenied", verb, err)
+				}
+				// Without this the operator retries a permanent misconfiguration
+				// on backoff forever, looking exactly like throttling.
+				if !strings.Contains(err.Error(), "enableRbacAuthorization") {
+					t.Errorf("%s error = %q, want it to name the access-policy vault case", verb, err)
+				}
+			}
+			if !strings.Contains(importErr.Error(), "certificates/import") {
+				t.Errorf("import error = %q, want it to name the permission that is missing", importErr)
+			}
+		})
 	}
 }
 

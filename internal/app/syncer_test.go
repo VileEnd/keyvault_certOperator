@@ -44,10 +44,16 @@ func (f *fakeVault) Import(_ context.Context, ref app.VaultRef, req app.ImportRe
 	return app.ImportResult{Version: "v1"}, nil
 }
 
-type fakeEncoder struct{ calls int }
+type fakeEncoder struct {
+	calls int
+	err   error
+}
 
 func (f *fakeEncoder) Encode(*domain.Bundle) ([]byte, string, error) {
 	f.calls++
+	if f.err != nil {
+		return nil, "", f.err
+	}
 	return []byte("pfx"), "changeit", nil
 }
 
@@ -272,6 +278,31 @@ func TestSyncPropagatesVaultErrors(t *testing.T) {
 
 	if !errors.Is(err, sentinel) {
 		t.Errorf("Sync() = %v, want it to wrap %v", err, sentinel)
+	}
+}
+
+func TestSyncBlamesTheEncoderRatherThanTheVault(t *testing.T) {
+	t.Parallel()
+	// Encoding happens in this process, before a single byte is sent, so a
+	// failure here says nothing about Key Vault -- and reporting it as a vault
+	// error is what sent people to the Azure portal for a local problem.
+	bundle := newBundle(t, "*.x.com")
+	vault := &fakeVault{snapshot: domain.VaultSnapshot{Exists: false}}
+	sentinel := errors.New("pkcs12: unsupported private key type")
+
+	_, err := newSyncer(&fakeSource{bundle: bundle}, vault, &fakeEncoder{err: sentinel}).
+		Sync(t.Context(), request())
+
+	if !errors.Is(err, domain.ErrPKCS12Encoding) {
+		t.Errorf("Sync() = %v, want it to wrap ErrPKCS12Encoding", err)
+	}
+	// The cause still has to travel: the sentinel says which subsystem failed,
+	// not what went wrong inside it.
+	if !errors.Is(err, sentinel) {
+		t.Errorf("Sync() = %v, want it to wrap %v", err, sentinel)
+	}
+	if len(vault.imports) != 0 {
+		t.Errorf("imports = %d, want 0 -- nothing was encoded to send", len(vault.imports))
 	}
 }
 

@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/VileEnd/keyvault_certOperator/api/v1alpha1"
+	"github.com/VileEnd/keyvault_certOperator/internal/controller"
 	"github.com/VileEnd/keyvault_certOperator/internal/testutil"
 )
 
@@ -261,6 +263,88 @@ func TestSyncControllerWaitsForACertificateThatDoesNotExistYet(t *testing.T) {
 	leaf := root.Issue(t, testutil.LeafOptions{DNSNames: []string{"*.pending.com"}})
 	if err := k8sClient.Create(ctx, newTLSSecret(t, namespace, "pending-tls", leaf)); err != nil {
 		t.Fatalf("creating secret: %v", err)
+	}
+
+	eventually(t, 30*time.Second, func() error {
+		var got v1alpha1.KeyVaultCertificateSync
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(sync), &got); err != nil {
+			return err
+		}
+		if !meta.IsStatusConditionTrue(got.Status.Conditions, v1alpha1.ConditionReady) {
+			return fmt.Errorf("not ready: %+v", got.Status.Conditions)
+		}
+		return nil
+	})
+
+	if count := testVault.importCount(certName); count != 1 {
+		t.Errorf("imports = %d, want 1", count)
+	}
+}
+
+func TestSyncControllerNamesAnUnlabelledSecretRatherThanCallingItMissing(t *testing.T) {
+	requireEnvtest(t)
+	ctx := t.Context()
+	const namespace = "sync-unlabelled"
+	const certName = "wildcard-unlabelled-com"
+
+	if err := k8sClient.Create(ctx, newNamespace(namespace)); err != nil {
+		t.Fatalf("creating namespace: %v", err)
+	}
+
+	root := testutil.NewRootCA(t, "test root")
+	leaf := root.Issue(t, testutil.LeafOptions{DNSNames: []string{"*.unlabelled.com"}})
+
+	// The hand-written case: a Secret that exists, that kubectl shows, and that
+	// the operator's label-selected cache is never sent. Reported as
+	// SourceNotFound it reads as "cert-manager has not issued this", which is
+	// the one thing it is not.
+	secret := newTLSSecret(t, namespace, "unlabelled-tls", leaf)
+	secret.Labels = nil
+	if err := k8sClient.Create(ctx, secret); err != nil {
+		t.Fatalf("creating secret: %v", err)
+	}
+
+	sync := &v1alpha1.KeyVaultCertificateSync{
+		ObjectMeta: metav1.ObjectMeta{Name: "unlabelled", Namespace: namespace},
+		Spec: v1alpha1.KeyVaultCertificateSyncSpec{
+			Source:   v1alpha1.CertificateSourceSpec{SecretRef: v1alpha1.LocalSecretReference{Name: "unlabelled-tls"}},
+			KeyVault: v1alpha1.KeyVaultSpec{Name: "my-vault", CertificateName: certName},
+		},
+	}
+	if err := k8sClient.Create(ctx, sync); err != nil {
+		t.Fatalf("creating sync: %v", err)
+	}
+
+	eventually(t, 30*time.Second, func() error {
+		var got v1alpha1.KeyVaultCertificateSync
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(sync), &got); err != nil {
+			return err
+		}
+		condition := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+		if condition == nil || condition.Status != metav1.ConditionFalse {
+			return fmt.Errorf("Ready = %+v, want False", condition)
+		}
+		if condition.Reason != controller.ReasonSourceSecretNotVisible {
+			return fmt.Errorf("reason = %q, want %q", condition.Reason, controller.ReasonSourceSecretNotVisible)
+		}
+		// The message has to carry the fix, since the label is the whole
+		// difference between this and a Secret that is genuinely absent.
+		if !strings.Contains(condition.Message, v1alpha1.LabelManaged+"="+v1alpha1.LabelManagedValue) {
+			return fmt.Errorf("message = %q, want it to name the required label", condition.Message)
+		}
+		return nil
+	})
+
+	// Applying the fix must be enough on its own: labelling moves the Secret
+	// into the watch, which wakes the controller with no further nudge.
+	//
+	// The object from Create is updated rather than re-read, because k8sClient
+	// reads through the same label-selected cache the operator uses -- an
+	// unlabelled Secret is exactly as invisible to this test as it is to the
+	// controller, which is the point being made.
+	secret.Labels = map[string]string{v1alpha1.LabelManaged: v1alpha1.LabelManagedValue}
+	if err := k8sClient.Update(ctx, secret); err != nil {
+		t.Fatalf("labelling secret: %v", err)
 	}
 
 	eventually(t, 30*time.Second, func() error {
