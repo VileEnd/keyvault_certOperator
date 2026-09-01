@@ -104,6 +104,13 @@ type PlanInput struct {
 	// CertificateRequest.VaultName follows the pin; Name stays derived, so
 	// pinning never renames -- and therefore never orphans -- resources the
 	// cluster already holds.
+	//
+	// It does not make the derived name stable, though, which is why the API
+	// requires IssueZoneWildcards alongside it: perZoneNameSeed renames a zone's
+	// certificate when "*.<zone>" first becomes covered, and a resource retained
+	// under the old name still carries the pin in its own spec, so both would
+	// write the same vault object. BuildPlan cannot see resources retained from
+	// an earlier plan, so it cannot catch that itself.
 	CertificateNames map[string]string
 }
 
@@ -296,10 +303,11 @@ func group(required map[string]map[string]struct{}, grouping Grouping) ([]Certif
 //
 // The consequence to know about is that discovering "*.<zone>" later renames
 // the certificate, leaving the old one as an orphan. Setting
-// issueZoneWildcards pins the name, because the zone wildcard is then always
-// covered. PlanInput.CertificateNames pins the Key Vault object name instead,
-// which keeps a rename inside the cluster: the vault object the gateway serves
-// stays the same one and keeps being updated.
+// issueZoneWildcards fixes the name, because the zone wildcard is then always
+// covered, and that is why PlanInput.CertificateNames may not be used without
+// it: a pinned name outlives the rename in the orphan's own spec, so instead of
+// keeping the rename inside the cluster it puts two resources on the one vault
+// object the gateway is serving.
 func perZoneNameSeed(zone string, names []string) string {
 	if wildcard := "*." + zone; contains(names, wildcard) {
 		return wildcard

@@ -25,8 +25,9 @@ const (
 	ReasonVaultError         = "VaultError"
 	ReasonDiscoveryFailed    = "DiscoveryFailed"
 	// ReasonVaultAccessDenied means Key Vault answered 401 or 403. It is kept
-	// apart from VaultError because it is the one vault failure that never
-	// clears on its own: somebody has to grant a permission.
+	// apart from VaultError because it is the one vault failure retrying does
+	// not resolve: somebody has to grant a permission, or finish propagating
+	// the grant they just made.
 	ReasonVaultAccessDenied = "VaultAccessDenied"
 	// ReasonEncodingFailed means the PKCS#12 payload could not be built. Nothing
 	// was sent to Azure, so this failure says nothing at all about the vault.
@@ -42,6 +43,11 @@ const (
 	// not deleted, because the discovery pass they were judged against could
 	// not be trusted to be complete.
 	ReasonPruneWithheld = "PruneWithheld"
+	// ReasonVaultObjectConflict means a sync resource this policy generated
+	// earlier still writes a Key Vault object the current plan writes under
+	// another name. Applying that plan would put two writers on one object, so
+	// it is refused whole.
+	ReasonVaultObjectConflict = "VaultObjectConflict"
 )
 
 // updateStatus writes a resource's status subresource, tolerating the two
@@ -135,9 +141,12 @@ func classify(err error) (reason string, retryable bool) {
 		// encode against the same input.
 		return ReasonEncodingFailed, false
 	case errors.Is(err, domain.ErrVaultAccessDenied):
-		// The one 4xx that is worth separating from the retryable rest: a
-		// missing grant is permanent, and backing off against it forever is
-		// exactly how a misconfigured vault came to look like throttling.
+		// The one 4xx worth separating from the retryable rest: no backoff makes
+		// a grant appear, and backing off against one forever is exactly how a
+		// misconfigured vault came to look like throttling. Not permanent,
+		// though -- a grant made seconds ago answers the same 403 until it
+		// propagates -- so the sync controller re-checks it on
+		// AccessDeniedRetryInterval rather than waiting out the whole resync.
 		return ReasonVaultAccessDenied, false
 	default:
 		return ReasonVaultError, true

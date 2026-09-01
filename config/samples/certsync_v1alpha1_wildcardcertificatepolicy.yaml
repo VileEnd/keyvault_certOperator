@@ -33,6 +33,13 @@ spec:
   # non-adjustable ceiling of 100.
   grouping: PerZone
 
+  # Issues "*.x.com" whether or not the cluster routes anything under it yet.
+  # Required by certificateNames below: a zone's certificate is named after its
+  # own wildcard only while that SAN is covered, so without this the certificate
+  # is renamed the first time discovery routes a name under the zone -- and the
+  # sync retained under the old name keeps writing the pinned object.
+  issueZoneWildcards: true
+
   # A wildcard matches exactly one label, so "*.x.com" does not cover "x.com".
   # Seeding the apex here rather than leaving it to discovery keeps an unrelated
   # Ingress from being load-bearing: delete the only object routing the apex and
@@ -53,10 +60,11 @@ spec:
     # certificateName is rejected here: a policy plans one certificate per zone,
     # so one name cannot apply to all of them. Pin them per zone instead.
 
-  # Optional, and only under grouping: PerZone. Pins the Key Vault object name a
-  # zone's certificate is imported into, for a gateway whose listeners already
-  # name what they serve -- repointing a live listener is a cutover. Unpinned
-  # zones keep the derived name, e.g. "*.x.com" becomes "wildcard-x-com".
+  # Optional. Requires grouping: PerZone and issueZoneWildcards: true. Pins the
+  # Key Vault object name a zone's certificate is imported into, for a gateway
+  # whose listeners already name what they serve -- repointing a live listener
+  # is a cutover. Unpinned zones keep the derived name, e.g. "*.x.com" becomes
+  # "wildcard-x-com".
   #
   # Only the vault object moves. The cert-manager Certificate, its Secret and the
   # generated sync keep their derived names, because that is how this policy

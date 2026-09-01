@@ -7,7 +7,7 @@ vault's permission model actually honours.
 
 ```hcl
 module "certoperator_identity" {
-  source = "github.com/VileEnd/keyvault_certOperator//terraform?ref=v0.1.1"
+  source = "github.com/VileEnd/keyvault_certOperator//terraform?ref=v0.2.0"
 
   resource_group_name = azurerm_resource_group.this.name
   location            = azurerm_resource_group.this.location
@@ -26,7 +26,7 @@ resource "helm_release" "certoperator" {
 
   repository = "oci://ghcr.io/vileend/charts"
   chart      = "keyvault-certoperator"
-  version    = "0.1.1"
+  version    = "0.2.0"
 
   dynamic "set" {
     for_each = module.certoperator_identity.helm_values
@@ -47,7 +47,7 @@ A complete example against an existing cluster and vault is in
 
 ## Pinning
 
-The `?ref=v0.1.1` above is load-bearing. Without it the source tracks `main`, so
+The `?ref=v0.2.0` above is load-bearing. Without it the source tracks `main`, so
 a `terraform apply` months from now can pick up whatever merged in between.
 
 What the tag promises is a reproducible artifact, not a stable interface. The
@@ -103,8 +103,10 @@ resource-manager SDK at all, so it never reads `enableRbacAuthorization` and
 behaves identically under either model. Only the *grant* differs, and Azure
 accepts the wrong one silently: a role assignment on an access-policy vault
 appears in the portal, reports success, and authorizes nothing. The first sign
-is a 403 on import, which the operator now reports as `VaultAccessDenied` and
-stops retrying.
+is a 403 on import, which the operator now reports as `VaultAccessDenied`
+rather than backing off against it forever. It still re-checks it every couple
+of minutes, because a grant of the *right* kind answers the same 403 for as long
+as it takes to propagate.
 
 That is what the module's preconditions exist to catch. Both grants are checked
 against the vault's own `rbac_authorization_enabled` before anything is created,

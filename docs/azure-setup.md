@@ -40,7 +40,7 @@ data "azurerm_key_vault" "this" {
 }
 
 module "certoperator_identity" {
-  source = "github.com/VileEnd/keyvault_certOperator//terraform?ref=v0.1.1"
+  source = "github.com/VileEnd/keyvault_certOperator//terraform?ref=v0.2.0"
 
   resource_group_name = "my-rg"
   location            = "westeurope"
@@ -63,7 +63,7 @@ resource "helm_release" "certoperator" {
 
   repository = "oci://ghcr.io/vileend/charts"
   chart      = "keyvault-certoperator"
-  version    = "0.1.1"
+  version    = "0.2.0"
 
   dynamic "set" {
     for_each = module.certoperator_identity.helm_values
@@ -387,9 +387,12 @@ vault and the permission that was being exercised — `certificates/get` or
 `certificates/import`, which are commonly granted apart, so a vault that reads
 fine can still refuse every import.
 
-It is reported separately from `VaultError` and is **not** retried, because a
-permission that was never granted does not appear on the next attempt; retrying
-it on a backoff is what made a misconfigured vault look like throttling.
+It is reported separately from `VaultError` and is **not** put on an
+exponential backoff, because a permission that was never granted does not appear
+by asking faster; retrying it that way is what made a misconfigured vault look
+like throttling. It is re-checked every couple of minutes instead — a grant made
+seconds ago answers exactly the same 403 until it propagates, which is the usual
+shape of `terraform apply` followed straight away by `helm install`.
 
 The usual cause is a grant of the wrong kind. Ask the vault which model it is
 actually using:

@@ -82,7 +82,7 @@ Full setup guide, including troubleshooting: **[docs/azure-setup.md](docs/azure-
 
 ```hcl
 module "certoperator_identity" {
-  source = "github.com/VileEnd/keyvault_certOperator//terraform?ref=v0.1.1"
+  source = "github.com/VileEnd/keyvault_certOperator//terraform?ref=v0.2.0"
 
   resource_group_name = "my-rg"
   location            = "westeurope"
@@ -123,7 +123,7 @@ asks the vault itself by default.
 
 ```bash
 helm upgrade --install keyvault-certoperator \
-  oci://ghcr.io/vileend/charts/keyvault-certoperator --version 0.1.1 \
+  oci://ghcr.io/vileend/charts/keyvault-certoperator --version 0.2.0 \
   --namespace keyvault-certoperator-system --create-namespace \
   --set azure.clientId=<managed-identity-client-id> \
   --set serviceAccount.name=keyvault-certoperator
@@ -132,7 +132,7 @@ helm upgrade --install keyvault-certoperator \
 Or with kustomize, in one URL:
 
 ```bash
-kubectl apply -f https://github.com/VileEnd/keyvault_certOperator/releases/download/v0.1.1/install.yaml
+kubectl apply -f https://github.com/VileEnd/keyvault_certOperator/releases/download/v0.2.0/install.yaml
 ```
 
 From a clone, `./charts/keyvault-certoperator` and `make deploy IMG=<your-image>`
@@ -223,7 +223,7 @@ for a commented example.
 | `discovery.gateways` | `true` | Gateway listener hostnames. Same startup constraint. See below. |
 | `issueZoneWildcards` | `false` | Issue `*.<zone>` for every zone even if nothing routes it yet. |
 | `issueZoneApex` | `false` | Also cover the bare zone. A wildcard never matches its own apex. |
-| `certificateNames` | derived | Pin the **Key Vault object name** per zone. `PerZone` only. See below. |
+| `certificateNames` | derived | Pin the **Key Vault object name** per zone. Requires `PerZone` and `issueZoneWildcards`. See below. |
 | `discovery.namespaceSelector` | all | Narrow discovery by namespace labels. |
 | `grouping` | `PerZone` | One SAN certificate per zone, or `PerWildcard`. |
 | `issuerRef` | — | Referenced, never created. Must use a DNS-01 solver. |
@@ -264,8 +264,16 @@ beside it — the value the listener is configured with — carries the pinned n
 Two pins may not name the same object (one Key Vault certificate cannot hold two
 different certificates), every key must be a zone from `zones`, and a zone with
 nothing planned yet is not an error — it simply has no certificate to name.
-`issueZoneWildcards: true` makes a zone's certificate exist regardless of what
-the cluster routes, which is what you want when a listener is already serving it.
+
+`issueZoneWildcards: true` is **required** alongside a pin, not merely advisable,
+and the example above sets it. A zone's certificate is named after its own
+wildcard only while that SAN is covered, so a zone that starts out apex-only is
+renamed the first time discovery routes a name under it — and the sync generated
+under the old name is retained by default, pin and all, leaving two resources
+overwriting the one Key Vault object the listener reads. Seeding the wildcard
+covers it whatever the cluster routes, which fixes the name. A plan that would
+put a second writer on an object is refused whole and reported as
+`VaultObjectConflict`, whichever way it got there.
 
 #### Gateway API (Envoy Gateway, Istio)
 
@@ -609,7 +617,7 @@ Application Gateway rotation, so a regression there degrades the vault quietly.
 
 ### Cutting a release
 
-From the Actions tab: run **Release**, give it the tag (`v0.1.1`) and tick
+From the Actions tab: run **Release**, give it the tag (`v0.2.0`) and tick
 **create_tag**. It does the whole thing in one run — creates the tag, builds and
 pushes the multi-arch image, publishes the chart to
 `oci://ghcr.io/vileend/charts`, and opens a GitHub release with `install.yaml`
@@ -625,7 +633,7 @@ publish nothing.
 Pushing a tag by hand works too, and triggers the same workflow:
 
 ```bash
-git tag -a v0.1.1 -m v0.1.1 && git push origin v0.1.1
+git tag -a v0.2.0 -m v0.2.0 && git push origin v0.2.0
 ```
 
 If publishing fails after the tag exists, re-run **Release** with the same tag

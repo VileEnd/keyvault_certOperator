@@ -1,8 +1,10 @@
 package controller_test
 
 import (
+	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -655,9 +657,12 @@ func TestPolicyRejectsANameItCannotHonour(t *testing.T) {
 
 	base := func() *v1alpha1.WildcardCertificatePolicySpec {
 		return &v1alpha1.WildcardCertificatePolicySpec{
-			Zones:                []string{"rejected.com"},
-			MaxCertificates:      10,
-			Grouping:             v1alpha1.GroupingPerZone,
+			Zones:           []string{"rejected.com"},
+			MaxCertificates: 10,
+			Grouping:        v1alpha1.GroupingPerZone,
+			// Set so that the cases pinning a name are rejected by the rule each
+			// one is about, rather than by the one requiring this flag.
+			IssueZoneWildcards:   true,
 			IssuerRef:            v1alpha1.IssuerReference{Name: "letsencrypt-dns", Kind: "ClusterIssuer", Group: "cert-manager.io"},
 			CertificateNamespace: "policy-rejected-certs",
 			KeyVault:             v1alpha1.KeyVaultSpec{Name: "my-vault"},
@@ -692,6 +697,18 @@ func TestPolicyRejectsANameItCannotHonour(t *testing.T) {
 				spec.CertificateNames = map[string]v1alpha1.VaultObjectName{"rejected.com": "9-ingress"}
 			},
 		},
+		{
+			// Without the zone wildcard always covered, the zone's certificate
+			// is renamed the first time discovery routes a name under it -- and
+			// the sync retained under the old name goes on writing the pinned
+			// object, so two of them overwrite each other on every resync.
+			name: "a pin the first discovered hostname would rename away from",
+			mutate: func(spec *v1alpha1.WildcardCertificatePolicySpec) {
+				spec.IssueZoneWildcards = false
+				spec.IssueZoneApex = true
+				spec.CertificateNames = map[string]v1alpha1.VaultObjectName{"rejected.com": "ingress-certificate"}
+			},
+		},
 	}
 
 	for i, tc := range tests {
@@ -712,4 +729,120 @@ func TestPolicyRejectsANameItCannotHonour(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A pin is only as stable as the name carrying it, and a sync retained from an
+// earlier plan can still be holding one. Two resources importing into a single
+// Key Vault object overwrite each other on every resync, half the versions
+// missing the SANs the listener needs, so the plan is refused whole rather than
+// applied on top of the writer already there.
+func TestPolicyRefusesToPutASecondWriterOnAPinnedKeyVaultObject(t *testing.T) {
+	requireEnvtest(t)
+	ctx := t.Context()
+	const certs = "policy-conflict-certs"
+	const policyName = "conflicting"
+
+	if err := k8sClient.Create(ctx, newNamespace(certs)); err != nil {
+		t.Fatalf("creating namespace %s: %v", certs, err)
+	}
+
+	// What a rename leaves behind under orphanPolicy: Retain -- the sync
+	// generated before "*.conflict.com" was covered, still writing the pinned
+	// object under the name it was created with.
+	retained := &v1alpha1.KeyVaultCertificateSync{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "conflict-com",
+			Namespace: certs,
+			Labels:    map[string]string{v1alpha1.LabelPolicy: policyName},
+		},
+		Spec: v1alpha1.KeyVaultCertificateSyncSpec{
+			Source:   v1alpha1.CertificateSourceSpec{SecretRef: v1alpha1.LocalSecretReference{Name: "conflict-com-tls"}},
+			KeyVault: v1alpha1.KeyVaultSpec{Name: "my-vault", CertificateName: "ingress-certificate"},
+		},
+	}
+	if err := k8sClient.Create(ctx, retained); err != nil {
+		t.Fatalf("creating the retained sync: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, retained) })
+
+	policy := &v1alpha1.WildcardCertificatePolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: policyName},
+		Spec: v1alpha1.WildcardCertificatePolicySpec{
+			Zones:                []string{"conflict.com"},
+			MaxCertificates:      10,
+			Grouping:             v1alpha1.GroupingPerZone,
+			IssueZoneWildcards:   true,
+			IssuerRef:            v1alpha1.IssuerReference{Name: "letsencrypt-dns", Kind: "ClusterIssuer", Group: "cert-manager.io"},
+			CertificateNamespace: certs,
+			KeyVault:             v1alpha1.KeyVaultSpec{Name: "my-vault"},
+			CertificateNames:     map[string]v1alpha1.VaultObjectName{"conflict.com": "ingress-certificate"},
+			OrphanPolicy:         v1alpha1.OrphanRetain,
+		},
+	}
+	if err := k8sClient.Create(ctx, policy); err != nil {
+		t.Fatalf("creating policy: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, policy) })
+
+	eventually(t, 30*time.Second, func() error {
+		var got v1alpha1.WildcardCertificatePolicy
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), &got); err != nil {
+			return err
+		}
+		ready := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+		if ready == nil || ready.Status != metav1.ConditionFalse {
+			return fmt.Errorf("ready = %+v, want False", ready)
+		}
+		if ready.Reason != controller.ReasonVaultObjectConflict {
+			return fmt.Errorf("reason = %q, want %q", ready.Reason, controller.ReasonVaultObjectConflict)
+		}
+		if !strings.Contains(ready.Message, retained.Name) {
+			return fmt.Errorf("message does not name the resource to delete: %s", ready.Message)
+		}
+		return nil
+	})
+
+	// Nothing was written: refusing after issuing the Certificate would still
+	// leave the second sync one reconcile away.
+	planned := client.ObjectKey{Namespace: certs, Name: "wildcard-conflict-com"}
+	consistently(t, 2*time.Second, func() error {
+		var sync v1alpha1.KeyVaultCertificateSync
+		if err := k8sClient.Get(ctx, planned, &sync); !apierrors.IsNotFound(err) {
+			return errors.New("a second sync resource was created for the pinned object")
+		}
+		var cert cmapi.Certificate
+		if err := k8sClient.Get(ctx, planned, &cert); !apierrors.IsNotFound(err) {
+			return errors.New("a certificate was issued despite the refusal")
+		}
+		return nil
+	})
+
+	// Removing the second writer is all it takes -- the refusal names it for
+	// exactly that reason -- and the plan then applies unchanged.
+	if err := k8sClient.Delete(ctx, retained); err != nil {
+		t.Fatalf("deleting the retained sync: %v", err)
+	}
+	// A sync the policy generated carries a controller reference, so deleting it
+	// wakes the policy; this hand-made stand-in does not, and waiting out the
+	// discovery interval would make the test ten minutes long.
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var current v1alpha1.WildcardCertificatePolicy
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), &current); err != nil {
+			return err
+		}
+		current.Annotations = map[string]string{"test.certsync.vileend.io/nudge": "1"}
+		return k8sClient.Update(ctx, &current)
+	}); err != nil {
+		t.Fatalf("nudging the policy: %v", err)
+	}
+	eventually(t, 60*time.Second, func() error {
+		var sync v1alpha1.KeyVaultCertificateSync
+		if err := k8sClient.Get(ctx, planned, &sync); err != nil {
+			return err
+		}
+		if sync.Spec.KeyVault.CertificateName != "ingress-certificate" {
+			return fmt.Errorf("certificateName = %q, want ingress-certificate", sync.Spec.KeyVault.CertificateName)
+		}
+		return nil
+	})
 }

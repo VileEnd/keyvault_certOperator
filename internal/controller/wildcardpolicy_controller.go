@@ -110,13 +110,14 @@ func (r *WildcardCertificatePolicyReconciler) Reconcile(ctx context.Context, req
 	}
 
 	// What already exists is read before planning, so the certificate cap can
-	// overflow a new certificate rather than evict one the cluster is serving.
-	existing, err := r.generatedCertificateNames(ctx, &policy)
+	// overflow a new certificate rather than evict one the cluster is serving,
+	// and so the plan can be checked against what it would be writing beside.
+	generated, err := r.generatedSyncs(ctx, &policy)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	state, err := r.plan(ctx, &policy, existing)
+	state, err := r.plan(ctx, &policy, syncNames(generated))
 	if err != nil {
 		reason, retryable := classify(err)
 		log.Error(err, "discovery failed", "reason", reason)
@@ -159,6 +160,20 @@ func (r *WildcardCertificatePolicyReconciler) Reconcile(ctx context.Context, req
 	}
 	setTrue(&policy.Status.Conditions, v1alpha1.ConditionCertManagerAvailable, ReasonCertManagerFound,
 		"cert-manager is installed", policy.Generation)
+
+	// Before anything is written, and only against orphans this pass is going
+	// to leave behind: under Prune the second writer is deleted by handleOrphans
+	// in this same reconcile, so refusing here would refuse the fix.
+	if policy.Spec.OrphanPolicy != v1alpha1.OrphanPrune || r.pruneWithheldReason(&policy, state) != "" {
+		if conflict := vaultObjectConflict(state.Certificates, generated); conflict != "" {
+			setFalse(&policy.Status.Conditions, v1alpha1.ConditionReady, ReasonVaultObjectConflict, conflict, policy.Generation)
+			r.event(&policy, corev1.EventTypeWarning, ReasonVaultObjectConflict, "Issue", conflict)
+			if err := r.updateStatus(ctx, &policy); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: jitter(DefaultDiscoveryInterval)}, nil
+		}
+	}
 
 	if err := r.apply(ctx, &policy, state); err != nil {
 		setFalse(&policy.Status.Conditions, v1alpha1.ConditionReady, ReasonIssuanceFailed, err.Error(), policy.Generation)
@@ -207,12 +222,23 @@ func (r *WildcardCertificatePolicyReconciler) Reconcile(ctx context.Context, req
 	return ctrl.Result{RequeueAfter: jitter(DefaultDiscoveryInterval)}, nil
 }
 
-// generatedCertificateNames lists the certificates this policy has already
-// generated. It reads the sync resources rather than status.requiredCertificates
-// because the question is what exists, not what was last planned.
-func (r *WildcardCertificatePolicyReconciler) generatedCertificateNames(
+// generatedSync is one sync resource this policy has already created.
+type generatedSync struct {
+	// name is the name it was generated under, which is how the policy
+	// recognises its own output.
+	name string
+	// object is the versionless secret identifier it writes: the vault and the
+	// object name together, so a comparison is against the thing actually
+	// written rather than a name that might belong to a different vault.
+	object string
+}
+
+// generatedSyncs lists the sync resources this policy has already generated. It
+// reads them rather than status.requiredCertificates because the question is
+// what exists, not what was last planned.
+func (r *WildcardCertificatePolicyReconciler) generatedSyncs(
 	ctx context.Context, policy *v1alpha1.WildcardCertificatePolicy,
-) ([]string, error) {
+) ([]generatedSync, error) {
 	var syncs v1alpha1.KeyVaultCertificateSyncList
 	if err := r.List(ctx, &syncs,
 		client.InNamespace(policy.Spec.CertificateNamespace),
@@ -220,11 +246,68 @@ func (r *WildcardCertificatePolicyReconciler) generatedCertificateNames(
 	); err != nil {
 		return nil, fmt.Errorf("listing generated sync resources: %w", err)
 	}
-	names := make([]string, 0, len(syncs.Items))
+	generated := make([]generatedSync, 0, len(syncs.Items))
 	for i := range syncs.Items {
-		names = append(names, syncs.Items[i].Name)
+		item := &syncs.Items[i]
+		// A vault that will not resolve is left with no object at all: the sync
+		// controller refuses that resource as ConfigInvalid before it connects
+		// to anything, so it is not a writer and cannot be collided with.
+		object := ""
+		if url, err := azure.VaultURL(vaultTarget(item.Spec.KeyVault), vaultCloud(item.Spec.KeyVault, r.Cloud)); err == nil {
+			object = app.VaultRef{VaultURL: url, CertificateName: item.Spec.KeyVault.CertificateName}.SecretIdentifier()
+		}
+		generated = append(generated, generatedSync{name: item.Name, object: object})
 	}
-	return names, nil
+	return generated, nil
+}
+
+// syncNames reduces the generated syncs to the names the certificate cap needs.
+func syncNames(generated []generatedSync) []string {
+	names := make([]string, 0, len(generated))
+	for _, sync := range generated {
+		names = append(names, sync.name)
+	}
+	return names
+}
+
+// vaultObjectConflict reports a generated sync resource that would go on writing
+// a Key Vault object this plan writes under a different name, or "" when there
+// is none.
+//
+// The domain refuses two certificates that would import into one object within
+// a single plan. It cannot see the plan before it, and a retained sync is
+// exactly that: when a zone's certificate is renamed, the sync generated under
+// the old name stays alive under orphanPolicy: Retain -- the default -- still
+// carrying the Key Vault object name it was created with. Where that name was
+// pinned, it is the object an Application Gateway listener is serving, so both
+// syncs import into it and overwrite each other on every resync and every
+// Secret event, leaving half the versions without the SANs the listener needs.
+//
+// Requiring issueZoneWildcards alongside a pin removes the rename that produces
+// this. The check stays because a policy stored before that rule, or a sync
+// resource labelled by hand, reaches the same state without it.
+func vaultObjectConflict(certs []app.DesiredCertificate, generated []generatedSync) string {
+	planned := make(map[string]string, len(certs))
+	wanted := make(map[string]struct{}, len(certs))
+	for _, cert := range certs {
+		planned[cert.SecretIdentifier] = cert.Name
+		wanted[cert.Name] = struct{}{}
+	}
+
+	for _, sync := range generated {
+		// Still required, so ensureSync updates it in place: one writer, not two.
+		if _, keep := wanted[sync.name]; keep {
+			continue
+		}
+		if other, taken := planned[sync.object]; taken {
+			return fmt.Sprintf("the sync resource %q is no longer required but still imports into %s, which "+
+				"this plan now writes through %q; applying it would leave two resources overwriting one Key Vault "+
+				"object, so nothing was applied. Delete %q -- deleting it does not touch the Key Vault "+
+				"certificate -- or drop the pin for that zone from spec.certificateNames",
+				sync.name, sync.object, other, sync.name)
+		}
+	}
+	return ""
 }
 
 func (r *WildcardCertificatePolicyReconciler) plan(

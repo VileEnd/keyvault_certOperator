@@ -37,6 +37,19 @@ const SecretRefIndexKey = ".spec.source.secretRef.name"
 // within seconds.
 const DefaultResyncInterval = time.Hour
 
+// AccessDeniedRetryInterval bounds how long a 401 or 403 from Key Vault is left
+// alone before it is looked at again.
+//
+// The classification stays terminal -- no exponential backoff, because no
+// amount of asking makes a grant that was never made appear -- but "never made"
+// and "made a minute ago" are the same 403 while a role assignment or an access
+// policy propagates, and that is the ordinary shape of a first install:
+// terraform apply, then helm install. Inheriting the resync interval there
+// leaves an already-correct vault reporting Ready=False for an hour. Nothing
+// about the grant landing touches the cluster, so there is no watch event to
+// wake this controller sooner.
+const AccessDeniedRetryInterval = 2 * time.Minute
+
 // KeyVaultCertificateSyncReconciler keeps one TLS Secret mirrored into one Key
 // Vault certificate.
 type KeyVaultCertificateSyncReconciler struct {
@@ -107,7 +120,8 @@ func (r *KeyVaultCertificateSyncReconciler) Reconcile(ctx context.Context, req c
 		}
 		// Not retryable by backoff, but still worth re-checking: the fix usually
 		// arrives as a renewed Secret, which also wakes this controller directly.
-		return ctrl.Result{RequeueAfter: jitter(resync)}, nil
+		// A grant does not, which is why it gets its own interval.
+		return ctrl.Result{RequeueAfter: jitter(recheckInterval(reason, resync))}, nil
 	}
 
 	r.applyOutcome(&sync, outcome)
@@ -315,6 +329,19 @@ func vaultCloud(spec v1alpha1.KeyVaultSpec, fallback azure.Cloud) azure.Cloud {
 		return azure.Cloud(spec.Cloud)
 	}
 	return fallback
+}
+
+// recheckInterval is how long to wait before re-checking a failure that backoff
+// cannot fix: the resync interval, capped for the one reason whose fix commonly
+// lands within minutes and produces no event in the cluster at all.
+//
+// A cap rather than a fixed value, so a resource that already asked for a
+// shorter resync keeps it.
+func recheckInterval(reason string, resync time.Duration) time.Duration {
+	if reason == ReasonVaultAccessDenied && resync > AccessDeniedRetryInterval {
+		return AccessDeniedRetryInterval
+	}
+	return resync
 }
 
 func resyncInterval(policy *v1alpha1.SyncPolicySpec) time.Duration {

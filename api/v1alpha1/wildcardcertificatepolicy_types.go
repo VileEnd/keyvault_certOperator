@@ -132,8 +132,20 @@ type VaultObjectName string
 // cost is that a policy already stored with it set has to drop it before it can
 // be updated again; validation ratcheting (Kubernetes 1.30+) limits that to
 // updates which touch the spec.
+//
+// The third rule closes the other half of the same trap. A pin is only as
+// stable as the certificate carrying it: a zone's certificate is named after
+// "*.<zone>" when that SAN is covered and after whatever else it holds when it
+// is not, so a zone that starts out apex-only is renamed the moment discovery
+// routes a name under it. The sync generated under the old name is retained --
+// Retain is the default -- and its spec still carries the pin, so two syncs
+// then import into the one Key Vault object the gateway is serving and
+// overwrite each other on every resync. Requiring issueZoneWildcards makes
+// "*.<zone>" covered unconditionally, which fixes the name and removes the
+// rename rather than trying to survive it.
 // +kubebuilder:validation:XValidation:rule="!has(self.keyVault.certificateName)",message="spec.keyVault.certificateName is ignored by a policy, which plans one certificate per zone; pin the Key Vault object name per zone with spec.certificateNames"
 // +kubebuilder:validation:XValidation:rule="!has(self.certificateNames) || (has(self.grouping) && self.grouping == 'PerZone')",message="spec.certificateNames requires grouping: PerZone, the only grouping where a zone has exactly one certificate to name"
+// +kubebuilder:validation:XValidation:rule="!has(self.certificateNames) || (has(self.issueZoneWildcards) && self.issueZoneWildcards)",message="spec.certificateNames requires issueZoneWildcards: true, which is what keeps a zone's certificate name fixed; without it, discovering *.<zone> renames the certificate and the sync retained under the old name keeps writing the pinned Key Vault object"
 type WildcardCertificatePolicySpec struct {
 	// Zones is the allowlist of DNS zones issuance may happen inside. It is
 	// required and has no permissive default.
@@ -240,8 +252,15 @@ type WildcardCertificatePolicySpec struct {
 	// Every key must be a zone from Zones, and no two zones may pin the same
 	// name: one Key Vault object cannot hold two different certificates. A zone
 	// with nothing planned yet is not an error, it simply has no certificate to
-	// name; issueZoneWildcards makes the zone's certificate exist regardless of
-	// what the cluster routes.
+	// name.
+	//
+	// IssueZoneWildcards is required alongside a pin, not merely advisable. A
+	// zone's certificate is named after "*.<zone>" only while that SAN is
+	// covered, so a zone that starts out apex-only is renamed as soon as
+	// discovery routes something under it -- and the sync generated under the
+	// old name is retained, pin and all, leaving two resources writing one Key
+	// Vault object. Seeding the zone wildcard covers it whatever the cluster
+	// routes, which fixes the name.
 	// +optional
 	// +kubebuilder:validation:MaxProperties=50
 	CertificateNames map[string]VaultObjectName `json:"certificateNames,omitempty"`

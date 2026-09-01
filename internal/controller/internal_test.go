@@ -74,8 +74,10 @@ func TestClassify(t *testing.T) {
 			wantReason: ReasonEncodingFailed,
 		},
 		{
-			// The distinction this whole table exists for: a 403 is permanent,
-			// and retried on backoff it is indistinguishable from throttling.
+			// The distinction this whole table exists for: no backoff makes a
+			// grant appear, and retried on one a 403 is indistinguishable from
+			// throttling. It is re-checked on AccessDeniedRetryInterval instead,
+			// because a grant that is merely still propagating answers the same.
 			name:       "vault access denied",
 			err:        fmt.Errorf("reading wildcard-x-com: %w", domain.ErrVaultAccessDenied),
 			wantReason: ReasonVaultAccessDenied,
@@ -387,5 +389,142 @@ certsync_certificate_not_after_timestamp_seconds{certificate="wildcard-y-com",na
 `
 	if err := testutil.CollectAndCompare(certificateNotAfter, strings.NewReader(want)); err != nil {
 		t.Errorf("the renamed certificate left a stale series behind:\n%v", err)
+	}
+}
+
+func TestRecheckIntervalShortensOnlyTheDeniedGrant(t *testing.T) {
+	t.Parallel()
+	// A denied grant is classified terminal, so it never reaches the workqueue's
+	// backoff and waits out this interval instead. Inheriting the resync there
+	// leaves an already-correct vault reporting Ready=False for an hour, because
+	// the grant landing in Azure produces no event in the cluster at all.
+	tests := []struct {
+		name   string
+		reason string
+		resync time.Duration
+		want   time.Duration
+	}{
+		{
+			name:   "a denied grant under the default resync",
+			reason: ReasonVaultAccessDenied,
+			resync: DefaultResyncInterval,
+			want:   AccessDeniedRetryInterval,
+		},
+		{
+			// A cap, not a fixed value: a resource that asked to be re-checked
+			// sooner keeps what it asked for.
+			name:   "a denied grant under a shorter resync",
+			reason: ReasonVaultAccessDenied,
+			resync: 30 * time.Second,
+			want:   30 * time.Second,
+		},
+		{
+			// The fix arrives as a rewritten Secret, which wakes the controller
+			// directly, so there is nothing to shorten.
+			name:   "an unusable source secret",
+			reason: ReasonSourceInvalid,
+			resync: DefaultResyncInterval,
+			want:   DefaultResyncInterval,
+		},
+		{"a vault outside the allowlist", ReasonConfigInvalid, DefaultResyncInterval, DefaultResyncInterval},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := recheckInterval(tc.reason, tc.resync); got != tc.want {
+				t.Errorf("recheckInterval(%s, %s) = %s, want %s", tc.reason, tc.resync, got, tc.want)
+			}
+		})
+	}
+}
+
+// The domain refuses two certificates that would import into one Key Vault
+// object within a single plan. This is the same refusal extended to the plan
+// before it: a sync retained under a name the plan no longer uses is still a
+// writer, and under a pin it writes the object the listener is serving.
+func TestVaultObjectConflictSpotsARetainedSecondWriter(t *testing.T) {
+	t.Parallel()
+	const vault = "https://my-vault.vault.azure.net"
+
+	planned := func(name, vaultName string) app.DesiredCertificate {
+		return app.DesiredCertificate{
+			CertificateRequest: domain.CertificateRequest{Name: name, VaultName: vaultName, Zone: "x.com"},
+			SecretIdentifier:   app.VaultRef{VaultURL: vault, CertificateName: vaultName}.SecretIdentifier(),
+		}
+	}
+	retained := func(name, vaultName string) generatedSync {
+		return generatedSync{
+			name:   name,
+			object: app.VaultRef{VaultURL: vault, CertificateName: vaultName}.SecretIdentifier(),
+		}
+	}
+
+	tests := []struct {
+		name         string
+		certs        []app.DesiredCertificate
+		generated    []generatedSync
+		wantConflict bool
+	}{
+		{
+			// The shape a pin creates: the zone's certificate was renamed once
+			// "*.x.com" became covered, and Retain -- the default -- left x-com
+			// behind still holding the pinned name in its own spec.
+			name:         "a renamed certificate leaves its pin behind",
+			certs:        []app.DesiredCertificate{planned("wildcard-x-com", "ingress-certificate")},
+			generated:    []generatedSync{retained("x-com", "ingress-certificate")},
+			wantConflict: true,
+		},
+		{
+			// The ordinary steady state: ensureSync updates this one in place.
+			name:      "the certificate the plan still requires",
+			certs:     []app.DesiredCertificate{planned("wildcard-x-com", "ingress-certificate")},
+			generated: []generatedSync{retained("wildcard-x-com", "ingress-certificate")},
+		},
+		{
+			// The orphan as it looked before pinning existed: it writes its own
+			// derived name, which nothing else in the plan touches.
+			name:      "an orphan holding its own derived name",
+			certs:     []app.DesiredCertificate{planned("wildcard-x-com", "ingress-certificate")},
+			generated: []generatedSync{retained("y-com", "y-com")},
+		},
+		{
+			// Same object name, different vault. Comparing names alone would
+			// call this a collision and refuse a plan that is fine.
+			name:  "an orphan pointed at another vault",
+			certs: []app.DesiredCertificate{planned("wildcard-x-com", "ingress-certificate")},
+			generated: []generatedSync{
+				{name: "x-com", object: "https://other-vault.vault.azure.net/secrets/ingress-certificate"},
+			},
+		},
+		{
+			// A vault that would not resolve leaves no object: the sync
+			// controller refuses that resource as ConfigInvalid before it
+			// connects to anything, so it never writes.
+			name:      "an orphan whose vault does not resolve",
+			certs:     []app.DesiredCertificate{planned("wildcard-x-com", "ingress-certificate")},
+			generated: []generatedSync{{name: "x-com"}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := vaultObjectConflict(tc.certs, tc.generated)
+			if tc.wantConflict {
+				if got == "" {
+					t.Fatal("a retained sync writing the planned object was not reported")
+				}
+				// The message is the whole remedy: nothing else tells an
+				// operator which resource to delete.
+				if !strings.Contains(got, tc.generated[0].name) {
+					t.Errorf("message does not name the retained sync: %s", got)
+				}
+				return
+			}
+			if got != "" {
+				t.Errorf("reported a conflict that is not one: %s", got)
+			}
+		})
 	}
 }

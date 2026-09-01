@@ -30,6 +30,12 @@ spec:
   # certificate cap as a discovered one.
   issueZoneWildcards: true
 
+  # A wildcard matches exactly one label, so "*.x.com" does not cover "x.com".
+  # Seeded here rather than left to discovery, which would make whichever
+  # HTTPRoute happens to name the apex load-bearing: delete it and the
+  # certificate is re-issued without that SAN.
+  issueZoneApex: true
+
   discovery:
     # No Ingress resources here, so skip listing a type that is always empty.
     ingress: false
@@ -40,9 +46,9 @@ spec:
     # listener this is the only source that sees anything at all.
     gateways: true
 
-  # PerZone issues one SAN certificate covering the wildcard and the apex --
-  # "*.x.com" does not match "x.com", so the apex needs its own SAN. Both fit on
-  # one Application Gateway listener, which accepts up to 5 hostnames.
+  # PerZone packs a zone's SANs into one certificate -- here the wildcard and
+  # the apex, both of them seeded above rather than discovered. Two hostnames
+  # fit on one Application Gateway listener, which accepts up to 5.
   grouping: PerZone
 
   # Referenced, never created. Must use a DNS-01 solver: wildcards cannot use
