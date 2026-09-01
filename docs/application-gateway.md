@@ -25,15 +25,25 @@ kubectl get wildcardcertificatepolicy public-sites \
 For a single sync resource, the same value is at
 `status.secretIdentifier`.
 
+Read the name out of that URI rather than out of `requiredCertificates[].name`.
+The two differ whenever a policy pins Key Vault object names with
+`spec.certificateNames`: `name` identifies the cert-manager `Certificate` and
+the sync inside the cluster and stays derived from the SANs, while the last path
+element of the secret identifier is the object the certificate is imported into
+— which is the one a listener is configured with, and the whole reason pinning
+exists. Adopting a gateway that already serves `ingress-certificate` means
+pinning that name and leaving the listener alone.
+
 ## Prerequisites
 
 | Requirement | Detail |
 |---|---|
 | SKU | **v2 only** (`Standard_v2` / `WAF_v2`). |
 | Identity | A **user-assigned** managed identity assigned to the gateway. System-assigned is not supported, and a gateway can hold only one. |
-| Role | That identity needs **Key Vault Secrets User** on the vault. Not Certificates User — the gateway resolves `/secrets/`, so `secrets/getSecret` is the true minimum. |
+| Role | That identity needs to read the vault's secrets: **Key Vault Secrets User** under Azure RBAC, or secret `Get` as an access policy. Not certificate permissions of either kind — the gateway resolves `/secrets/`, even for an object uploaded as a certificate. |
 | Certificate | Software-validated with an exportable private key. HSM-validated certificates are not supported. |
 | Portal | You **cannot** configure a Key Vault certificate reference through the portal when the vault uses RBAC. Use ARM, Bicep, CLI or PowerShell for the initial wiring. |
+| Certificate name | The Key Vault object name is fixed once a listener references it — renaming it is a cutover. A policy pins it per zone with `spec.certificateNames`; a standalone sync with `spec.keyVault.certificateName`. |
 
 Use a **separate identity** from the operator's. The operator writes
 certificates; the gateway only reads the secret behind one. Sharing an identity

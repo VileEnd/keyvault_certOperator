@@ -1,8 +1,9 @@
 # Terraform module: Azure wiring for keyvault-certoperator
 
 Creates the operator's managed identity, federates it to its Kubernetes
-ServiceAccount, and grants it the one Key Vault role it needs — scoped to the
-vault, never wider.
+ServiceAccount, and gives it the one Key Vault grant it needs — scoped to the
+vault, never wider — as a role assignment or as an access policy, whichever the
+vault's permission model actually honours.
 
 ```hcl
 module "certoperator_identity" {
@@ -79,16 +80,46 @@ resource "azurerm_kubernetes_cluster" "this" {
 }
 ```
 
-The vault must use RBAC, not the legacy access-policy model:
+The vault may use either permission model — but the module has to be told
+which, because a grant of the wrong kind applies cleanly and then does nothing:
 
 ```hcl
-resource "azurerm_key_vault" "this" {
-  enable_rbac_authorization = true
+# Azure RBAC (the default here): the operator gets a role assignment.
+module "certoperator_identity" {
+  # ...
+  vault_authorization = "rbac"
+}
+
+# Access policies: the operator gets certificate Get and Import instead.
+module "certoperator_identity" {
+  # ...
+  vault_authorization = "access-policy"
 }
 ```
 
-With access policies these role assignments have no effect at all, and every
-import fails with a 403 that does not explain why.
+The operator itself does not care. Its entire Azure surface is two Key Vault
+data-plane calls — `GetCertificate` and `ImportCertificate` — and it holds no
+resource-manager SDK at all, so it never reads `enableRbacAuthorization` and
+behaves identically under either model. Only the *grant* differs, and Azure
+accepts the wrong one silently: a role assignment on an access-policy vault
+appears in the portal, reports success, and authorizes nothing. The first sign
+is a 403 on import, which the operator now reports as `VaultAccessDenied` and
+stops retrying.
+
+That is what the module's preconditions exist to catch. Both grants are checked
+against the vault's own `rbac_authorization_enabled` before anything is created,
+so a mismatch fails the plan with a sentence instead of shipping an inert grant.
+
+## Upgrading a module that predates `vault_authorization`
+
+The operator's role assignment is now conditional, so it moved from
+`azurerm_role_assignment.operator` to `azurerm_role_assignment.operator[0]`.
+State that once and the plan is empty again:
+
+```console
+$ terraform state mv 'module.certoperator_identity.azurerm_role_assignment.operator' \
+    'module.certoperator_identity.azurerm_role_assignment.operator[0]'
+```
 
 ## Inputs
 
@@ -101,8 +132,9 @@ import fails with a 403 that does not explain why.
 | `identity_name` | string | `keyvault-certoperator` | Managed identity name. |
 | `namespace` | string | `keyvault-certoperator-system` | Namespace the operator runs in. |
 | `service_account_name` | string | `keyvault-certoperator` | Must match the SA that actually exists. |
-| `use_import_only_role` | bool | `false` | Custom import-only role instead of Certificates Officer. |
-| `application_gateway_principal_id` | string | `null` | Granted Key Vault Secrets User when set. |
+| `use_import_only_role` | bool | `false` | Custom import-only role instead of Certificates Officer. Ignored under access policies. |
+| `vault_authorization` | string | `rbac` | `rbac` or `access-policy`. Must match the vault, and is checked against it. |
+| `application_gateway_principal_id` | string | `null` | Granted read access to the vault's secrets when set. |
 | `tags` | map(string) | `{}` | Tags for created resources. |
 
 ## Outputs
@@ -118,14 +150,29 @@ import fails with a 403 that does not explain why.
 | `key_vault_uri` | Base URI of the granted vault; also the operator's allowlist entry. |
 | `key_vault_secret_uri_prefix` | Prefix for versionless listener URIs. |
 | `helm_values` | Map to feed straight into `helm_release`. |
-| `role_assigned` | Which role was granted on the vault. |
+| `role_assigned` | What was granted on the vault: a role name, or the access policy's permissions. |
+| `vault_authorization` | The permission model the grant was made under. |
 
-## Which role
+## Which role, or which access policy
 
-`use_import_only_role = false` (default) grants **Key Vault Certificates
-Officer**. It is the only built-in role carrying `certificates/import`, but it
-also grants delete and purge — which this operator never uses, and which are
-irreversible on a vault with purge protection off.
+Under `vault_authorization = "access-policy"` there is no role: the identity
+gets a Key Vault access policy carrying certificate **Get** and **Import**, and
+`use_import_only_role` is ignored because that policy is already exactly the two
+permissions the operator uses. It never lists — it reads one certificate by name
+— and never updates, because the chain digest it compares against travels inside
+the import request rather than as a separate tag write.
+
+One caveat: `azurerm_key_vault_access_policy` adds an entry to a vault this
+module does not own, and it cannot be combined with inline `access_policy`
+blocks on the vault's own resource — the two representations overwrite each
+other on every apply. Where the vault is declared that way, add the operator's
+entry alongside the vault's other ones, using `principal_id` from this module;
+there is no mode here for a grant made elsewhere.
+
+Under RBAC, `use_import_only_role = false` (default) grants **Key Vault
+Certificates Officer**. It is the only built-in role carrying
+`certificates/import`, but it also grants delete and purge — which this operator
+never uses, and which are irreversible on a vault with purge protection off.
 
 `use_import_only_role = true` creates a custom role with exactly two data
 actions: `certificates/import/action` and `certificates/read`. That read is not
@@ -139,14 +186,15 @@ pipeline identity has. That is the only reason it is not the default.
 
 ## Both sides of the scoping
 
-The role assignment bounds what the identity *can* write to. It does not bound
-what a cluster user may *ask* for -- `spec.keyVault` is chosen per-resource.
+The grant bounds what the identity *can* write to. It does not bound what a
+cluster user may *ask* for -- `spec.keyVault` is chosen per-resource.
 
 `helm_values` therefore also carries `azure.allowedVaults[0]`, set to the same
-vault the role assignment was scoped to. The Azure grant and the operator's own
-bound come from one source and cannot drift apart, and a resource naming any
-other vault fails immediately as a configuration error instead of as a 403 the
-operator would keep retrying.
+vault the grant was scoped to. The Azure grant and the operator's own bound come
+from one source and cannot drift apart, and a resource naming any other vault is
+refused before the operator connects to that host at all — reporting the
+allowlist it violated, rather than the access denial the vault would have
+answered with, which names a permission nobody intended to give it.
 
 ## The failure everyone hits
 

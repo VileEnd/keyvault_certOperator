@@ -52,15 +52,30 @@ output "helm_values" {
     "azure.tenantId"        = azurerm_user_assigned_identity.operator.tenant_id
     "serviceAccount.name"   = var.service_account_name
     "serviceAccount.create" = "true"
-    # The vault the role assignment above was scoped to. Passing it through
-    # means the Azure grant and the operator's own bound come from one source
-    # and cannot disagree: a resource naming any other vault fails immediately
-    # as a configuration error rather than as a 403 the operator keeps retrying.
+    # The vault the grant above was scoped to. Passing it through means the
+    # Azure grant and the operator's own bound come from one source and cannot
+    # disagree: a resource naming any other vault is refused before the operator
+    # connects to it, and reports the allowlist it violated rather than the
+    # access denial the vault would answer with.
     "azure.allowedVaults[0]" = data.azurerm_key_vault.target.vault_uri
   }
 }
 
+# Says what was actually granted, not what would have been under the other
+# permission model -- the point of naming it at all is to be able to compare it
+# against what the vault reports.
 output "role_assigned" {
-  description = "Which role the operator identity was granted on the vault."
-  value       = var.use_import_only_role ? azurerm_role_definition.importer[0].name : "Key Vault Certificates Officer"
+  description = "What the operator identity was granted on the vault: a role name under RBAC, or the access policy's permissions."
+  # one() rather than [0]: under access policies the custom role is not created
+  # at all, and an index into that empty list would fail the output rather than
+  # report the access policy.
+  value = (var.vault_authorization == "access-policy"
+    ? "access policy: certificates Get, Import"
+    : coalesce(one(azurerm_role_definition.importer[*].name), "Key Vault Certificates Officer")
+  )
+}
+
+output "vault_authorization" {
+  description = "The permission model the grants were made under. Compare against 'az keyvault show --query properties.enableRbacAuthorization'."
+  value       = var.vault_authorization
 }

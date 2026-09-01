@@ -3,14 +3,15 @@
 # Provisions the Azure side of keyvault-certoperator:
 #   * a user-assigned managed identity for the operator
 #   * a federated credential binding it to the operator's ServiceAccount
-#   * the Key Vault role assignment it needs, scoped to the vault
+#   * the Key Vault grant it needs, scoped to the vault -- a role assignment or
+#     an access policy, following the vault's own permission model
 #
-# It also prints the role assignment Application Gateway needs, which is a
-# *different* identity with a *narrower* role. Never share one identity between
-# the operator and the gateway: the operator writes certificates, the gateway
-# only reads the secret behind one.
+# It also prints the grant Application Gateway needs, which goes to a
+# *different* identity and is *narrower*. Never share one identity between the
+# operator and the gateway: the operator writes certificates, the gateway only
+# reads the secret behind one.
 #
-# Requires the Azure CLI, logged in, with permission to create role assignments.
+# Requires the Azure CLI, logged in, with permission to make that grant.
 set -euo pipefail
 
 : "${SUBSCRIPTION_ID:?set SUBSCRIPTION_ID}"
@@ -32,8 +33,18 @@ OPERATOR_NAMESPACE="${OPERATOR_NAMESPACE:-keyvault-certoperator-system}"
 #   SERVICE_ACCOUNT=keyvault-certoperator-controller-manager
 SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-keyvault-certoperator}"
 # Set USE_CUSTOM_ROLE=1 to use the narrower import-only role from
-# keyvault-import-only-role.json instead of the built-in officer role.
+# keyvault-import-only-role.json instead of the built-in officer role. It has no
+# effect on an access-policy vault, which ignores roles of either kind.
 USE_CUSTOM_ROLE="${USE_CUSTOM_ROLE:-0}"
+# rbac, access-policy, or auto (the default) to ask the vault which it uses.
+# Setting it explicitly makes this script refuse a vault that disagrees, which
+# is the useful thing to do in a pipeline where the vault is supposed to be a
+# known quantity.
+VAULT_AUTHORIZATION="${VAULT_AUTHORIZATION:-auto}"
+case "$VAULT_AUTHORIZATION" in
+  auto | rbac | access-policy) ;;
+  *) echo "VAULT_AUTHORIZATION must be auto, rbac or access-policy" >&2; exit 1 ;;
+esac
 
 az account set --subscription "$SUBSCRIPTION_ID"
 
@@ -73,7 +84,44 @@ az identity federated-credential create \
 
 VAULT_ID=$(az keyvault show --name "$KEYVAULT_NAME" --query id -o tsv)
 
-if [[ "$USE_CUSTOM_ROLE" == "1" ]]; then
+# Which grant to make is decided by the vault, not by preference: a role
+# assignment on an access-policy vault is accepted and then ignored, and an
+# access policy on an RBAC vault likewise. Either mistake applies cleanly and
+# surfaces only as a 403 on the first import, which is why this is asked rather
+# than assumed. A null means the property was never set, which is the legacy
+# access-policy model.
+RBAC_ENABLED=$(az keyvault show --name "$KEYVAULT_NAME" --query properties.enableRbacAuthorization -o tsv)
+if [[ "$RBAC_ENABLED" == "true" ]]; then
+  DETECTED=rbac
+else
+  DETECTED=access-policy
+fi
+if [[ "$VAULT_AUTHORIZATION" == "auto" ]]; then
+  VAULT_AUTHORIZATION="$DETECTED"
+elif [[ "$VAULT_AUTHORIZATION" != "$DETECTED" ]]; then
+  echo "VAULT_AUTHORIZATION=${VAULT_AUTHORIZATION} but ${KEYVAULT_NAME} uses ${DETECTED};" \
+    "a grant of the wrong kind applies cleanly and then does nothing" >&2
+  exit 1
+fi
+echo "==> ${KEYVAULT_NAME} uses the ${VAULT_AUTHORIZATION} permission model"
+
+if [[ "$VAULT_AUTHORIZATION" == "access-policy" ]]; then
+  # Get and Import is the operator's entire Key Vault surface: it reads one
+  # certificate by name before deciding whether to import, so it never lists,
+  # and the chain digest it compares against travels inside the import request
+  # rather than as an update.
+  #
+  # set-policy *replaces* this principal's entry rather than merging into it. On
+  # a fresh identity that is what you want; if the identity is one you already
+  # granted something else, read the existing entry back first.
+  echo "==> Granting certificate Get and Import as an access policy on the vault"
+  az keyvault set-policy \
+    --name "$KEYVAULT_NAME" \
+    --object-id "$PRINCIPAL_ID" \
+    --certificate-permissions get import \
+    --only-show-errors >/dev/null
+  GRANTED="access policy: certificates Get, Import"
+elif [[ "$USE_CUSTOM_ROLE" == "1" ]]; then
   ROLE_NAME="Key Vault Certificate Importer"
   echo "==> Ensuring the custom role '${ROLE_NAME}' exists"
   tmp=$(mktemp)
@@ -88,17 +136,31 @@ else
   ROLE_NAME="Key Vault Certificates Officer"
 fi
 
-echo "==> Granting '${ROLE_NAME}' on the vault only, never the subscription"
-az role assignment create \
-  --assignee-object-id "$PRINCIPAL_ID" \
-  --assignee-principal-type ServicePrincipal \
-  --role "$ROLE_NAME" \
-  --scope "$VAULT_ID" \
-  --only-show-errors >/dev/null
+if [[ "$VAULT_AUTHORIZATION" == "rbac" ]]; then
+  echo "==> Granting '${ROLE_NAME}' on the vault only, never the subscription"
+  az role assignment create \
+    --assignee-object-id "$PRINCIPAL_ID" \
+    --assignee-principal-type ServicePrincipal \
+    --role "$ROLE_NAME" \
+    --scope "$VAULT_ID" \
+    --only-show-errors >/dev/null
+  GRANTED="$ROLE_NAME"
+fi
+
+if [[ "$VAULT_AUTHORIZATION" == "access-policy" ]]; then
+  GATEWAY_GRANT="az keyvault set-policy --name ${KEYVAULT_NAME} \\
+         --object-id <gateway-identity-principal-id> --secret-permissions get"
+else
+  GATEWAY_GRANT="az role assignment create --role 'Key Vault Secrets User' \\
+         --assignee-object-id <gateway-identity-principal-id> \\
+         --assignee-principal-type ServicePrincipal --scope ${VAULT_ID}"
+fi
 
 cat <<EOF
 
-Done. Annotate the operator's ServiceAccount with:
+Done. The operator identity holds ${GRANTED} on ${KEYVAULT_NAME}.
+
+Annotate the operator's ServiceAccount with:
 
   azure.workload.identity/client-id: ${CLIENT_ID}
 
@@ -124,8 +186,12 @@ name is wrong. If you install some other way, confirm with:
 Still to do, for Application Gateway:
 
   1. Assign a *separate* user-assigned managed identity to the gateway and give
-     it "Key Vault Secrets User" on ${KEYVAULT_NAME}. The gateway reads
-     /secrets/, not /certificates/, so Secrets User is the true minimum.
+     it read access to the vault's secrets. The gateway reads /secrets/, not
+     /certificates/, even for an object that was uploaded as a certificate, so
+     that is its true minimum -- and a grant carrying certificate permissions
+     instead fails exactly like no grant at all. On this vault:
+
+       ${GATEWAY_GRANT}
   2. Point each listener at the versionless secret identifier this operator
      reports in status.secretIdentifier. A versioned URI permanently disables
      the four-hourly automatic rotation.

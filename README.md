@@ -50,7 +50,7 @@ Ingress rules/TLS · Gateway listeners · HTTPRoute hostnames
         │  discovery (zone allowlist + public-suffix guard)
         ▼
 WildcardCertificatePolicy ──creates──► cert-manager Certificate ──► TLS Secret
-        │                                    (ACME DNS-01, Azure DNS)     │
+        │                                    (ACME DNS-01, any solver)    │
         └──creates──► KeyVaultCertificateSync ◄───────────watches─────────┘
                               │
                               │  import only when the leaf or chain changed
@@ -63,8 +63,10 @@ WildcardCertificatePolicy ──creates──► cert-manager Certificate ──
 ```
 
 Issuance is delegated, not reimplemented. cert-manager already performs ACME
-DNS-01 against Azure DNS with workload identity and owns renewal timing, so this
-operator needs **no Azure DNS permissions at all**.
+DNS-01 — against Azure DNS, Cloudflare, Route 53 or anything else it has a
+solver for — and owns renewal timing, so this operator needs **no DNS
+permissions at all**. `issuerRef` is copied through verbatim; the operator never
+looks at how the challenge is solved.
 
 **Wildcards need no pods.** Wildcard certificates cannot use HTTP-01 — Let's
 Encrypt requires DNS-01, which never touches the cluster. There is no challenge
@@ -97,15 +99,25 @@ export SUBSCRIPTION_ID=... RESOURCE_GROUP=... CLUSTER_NAME=... KEYVAULT_NAME=...
 ```
 
 Either way you get a user-assigned managed identity, federated to the operator's
-ServiceAccount, holding **Key Vault Certificates Officer** scoped to the vault
-only. Set `USE_CUSTOM_ROLE=1` (or `use_import_only_role = true`) for the
-narrower import-only role in `config/azure/keyvault-import-only-role.json` — the
-built-in officer role also permits delete and purge, and there is no built-in
+ServiceAccount, allowed to read and import certificates on that vault only.
+Under Azure RBAC that is **Key Vault Certificates Officer**; set
+`USE_CUSTOM_ROLE=1` (or `use_import_only_role = true`) for the narrower
+import-only role in `config/azure/keyvault-import-only-role.json` — the built-in
+officer role also permits delete and purge, and there is no built-in
 import-only role.
 
-The cluster needs `oidc_issuer_enabled` **and** `workload_identity_enabled`, and
-the vault needs RBAC authorization rather than access policies. Neither is a
-default.
+The cluster needs `oidc_issuer_enabled` **and** `workload_identity_enabled`;
+neither is a default. The vault needs **RBAC authorization, or an access policy
+granting the operator's identity certificate `Get` and `Import`** — the
+operator's entire Azure surface is two Key Vault data-plane calls, and they
+behave identically under both models.
+
+What does not work is a grant of the wrong kind. A role assignment on an
+access-policy vault is accepted by ARM, shows up correctly in the portal, and
+authorizes nothing; the first symptom is a 403 on import. So say which model the
+vault uses — `vault_authorization` in Terraform, which is checked against the
+vault before anything is created, or `VAULT_AUTHORIZATION` for `setup.sh`, which
+asks the vault itself by default.
 
 ### 2. Install
 
@@ -210,11 +222,50 @@ for a commented example.
 | `discovery.httpRoutes` | `true` | Only watched if Gateway API CRDs exist at operator start. |
 | `discovery.gateways` | `true` | Gateway listener hostnames. Same startup constraint. See below. |
 | `issueZoneWildcards` | `false` | Issue `*.<zone>` for every zone even if nothing routes it yet. |
+| `issueZoneApex` | `false` | Also cover the bare zone. A wildcard never matches its own apex. |
+| `certificateNames` | derived | Pin the **Key Vault object name** per zone. `PerZone` only. See below. |
 | `discovery.namespaceSelector` | all | Narrow discovery by namespace labels. |
 | `grouping` | `PerZone` | One SAN certificate per zone, or `PerWildcard`. |
 | `issuerRef` | — | Referenced, never created. Must use a DNS-01 solver. |
 | `certificateNamespace` | — | Where Certificates, Secrets and syncs are created. |
 | `orphanPolicy` | `Retain` | `Prune` also deletes no-longer-required resources. |
+| `keyVault.certificateName` | — | **Rejected on a policy.** One name cannot apply to every zone; use `certificateNames`. |
+
+#### Adopting a gateway that already serves named certificates
+
+An Application Gateway listener references a Key Vault object *by name*, and
+repointing a live listener is a cutover. A platform moving onto this operator
+therefore needs the certificate to land on the name already wired up —
+`ingress-certificate`, say — not on the derived `wildcard-x-com`.
+
+```yaml
+spec:
+  zones: [x.com, tm.x.com]
+  grouping: PerZone
+  # Keyed by zone. Unpinned zones keep the derived name.
+  certificateNames:
+    x.com: ingress-certificate
+    tm.x.com: TM-certificate
+  # A wildcard matches exactly one label, so "*.x.com" does not cover "x.com".
+  # Without this the apex is a SAN only for as long as some Ingress or Gateway
+  # happens to route it -- and deleting that unrelated object re-issues the
+  # certificate without the apex, under the name the gateway is serving.
+  issueZoneApex: true
+  issueZoneWildcards: true
+```
+
+Only the Key Vault object name moves. The cert-manager `Certificate`, its Secret
+and the generated sync keep their derived names, because that is how the policy
+recognises its own output — renaming them would orphan everything already issued
+and re-issue the lot against Let's Encrypt's duplicate-certificate limit. So
+`status.requiredCertificates[].name` stays derived while the `secretIdentifier`
+beside it — the value the listener is configured with — carries the pinned name.
+
+Two pins may not name the same object (one Key Vault certificate cannot hold two
+different certificates), every key must be a zone from `zones`, and a zone with
+nothing planned yet is not an error — it simply has no certificate to name.
+`issueZoneWildcards: true` makes a zone's certificate exist regardless of what
+the cluster routes, which is what you want when a listener is already serving it.
 
 #### Gateway API (Envoy Gateway, Istio)
 
@@ -270,7 +321,7 @@ manage certificates yourself.
 | Field | Default | Notes |
 |---|---|---|
 | `source.secretRef.name` | — | A `kubernetes.io/tls` Secret in the **same namespace**. |
-| `keyVault.name` / `keyVault.vaultURL` | — | Exactly one. `vaultURL` for sovereign clouds or private endpoints. |
+| `keyVault.name` / `keyVault.vaultURL` | — | Exactly one. `name` is a bare vault name, 3–24 characters — Azure's own limit — so anything longer, a sovereign cloud or a private endpoint goes in `vaultURL`. |
 | `keyVault.certificateName` | derived | Derived from the SANs, e.g. `*.x.com` → `wildcard-x-com`. |
 | `syncPolicy.resyncInterval` | `1h` | Catches drift applied to Key Vault out of band. |
 | `syncPolicy.pkcs12Profile` | `legacy` | `legacy`, `passwordless` or `modern`. |
@@ -279,6 +330,113 @@ manage certificates yourself.
 > cache only watches labelled Secrets, so an unlabelled one is invisible to it by
 > design. Generated certificates get the label automatically via cert-manager's
 > `secretTemplate`.
+
+#### Standalone: your `Certificate`, this operator's Key Vault half
+
+A hand-written sync is a first-class way to use this operator, not a degraded
+one. `Reconcile` looks at no owner reference and no policy label, there is no
+admission webhook, and the CRD requires only `spec.source` and `spec.keyVault` —
+a sync you wrote is reconciled exactly like one a policy generated. Use it when
+you want cert-manager's `Certificate` under your own control (a fixed SAN list,
+a specific issuer, a certificate that predates the operator) and only the Key
+Vault import from here.
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wildcard-x-com
+  namespace: cert-system
+spec:
+  secretName: wildcard-x-com-tls
+  dnsNames:
+  - "*.x.com"
+  - x.com          # a wildcard does not match its own apex
+  issuerRef:
+    name: letsencrypt-dns
+    kind: ClusterIssuer
+  # The label belongs here and nowhere else. cert-manager re-applies
+  # secretTemplate every time it reconciles the Secret, including on renewal, so
+  # a label added with "kubectl label" to a Secret cert-manager owns is reverted
+  # -- possibly 60 days later, quietly.
+  secretTemplate:
+    labels:
+      certsync.vileend.io/managed: "true"
+---
+apiVersion: certsync.vileend.io/v1alpha1
+kind: KeyVaultCertificateSync
+metadata:
+  name: wildcard-x-com
+  namespace: cert-system     # the Secret's namespace, necessarily
+spec:
+  source:
+    secretRef:
+      name: wildcard-x-com-tls
+  keyVault:
+    name: my-vault
+    # The name the Application Gateway listener already references. Left unset
+    # it is derived from the SANs: "*.x.com" becomes "wildcard-x-com".
+    certificateName: ingress-certificate
+```
+
+Four things this shape depends on:
+
+- **The label is load-bearing.** The operator's Secret cache is scoped by
+  `certsync.vileend.io/managed: "true"` at the watch level, so an unlabelled
+  Secret is never sent to the operator at all — which is also what keeps
+  unrelated private keys out of its memory. A Secret that exists without the
+  label is reported as `SourceSecretNotVisible`, distinct from a Secret that
+  genuinely is not there yet, and the message names the label to add.
+- **The sync must live in the source Secret's namespace.** `secretRef` is
+  deliberately namespace-local: a cross-namespace reference would let a resource
+  in one namespace read TLS private keys out of another.
+- **`keyVault.name` takes a bare vault name and nothing else** — 3 to 24
+  characters, Azure's own limit on vault names. A full URL does not fit, and
+  neither does a private-endpoint or sovereign-cloud host; those go in
+  `keyVault.vaultURL`, which is mutually exclusive with `name`.
+- **`Ready` is the automation gate.** It goes true once Key Vault holds this
+  exact certificate and the version is enabled, which is the point at which the
+  listener can be pointed at it:
+
+  ```bash
+  kubectl wait --for=condition=Ready keyvaultcertificatesync/wildcard-x-com \
+    -n cert-system --timeout=15m
+  kubectl get keyvaultcertificatesync wildcard-x-com -n cert-system \
+    -o jsonpath='{.status.secretIdentifier}'
+  ```
+
+#### The issuer is yours, and so is the DNS provider
+
+The operator copies `issuerRef` through untouched and holds no DNS permissions
+of its own, so any DNS-01 solver cert-manager supports works — Azure DNS is the
+common case here, not a requirement. Cloudflare, for a zone that has not been
+delegated to Azure:
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-dns
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: platform@x.com
+    privateKeySecretRef:
+      name: letsencrypt-dns-account-key
+    solvers:
+    - dns01:
+        cloudflare:
+          apiTokenSecretRef:
+            name: cloudflare-api-token
+            key: api-token
+```
+
+> A **ClusterIssuer** resolves every Secret it references — the ACME account key
+> and the solver's API token both — in cert-manager's `clusterResourceNamespace`
+> (`cert-manager` unless the deployment overrides it), *not* in the namespace of
+> the `Certificate` using it. Putting the token next to the Certificate instead
+> leaves the issuer reporting a missing Secret while the Secret is plainly
+> there. A namespaced `Issuer` reads them from its own namespace.
 
 ## Design decisions worth knowing
 

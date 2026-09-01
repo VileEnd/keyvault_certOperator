@@ -10,12 +10,13 @@ variable "location" {
 
 variable "key_vault_id" {
   description = <<-EOT
-    Resource ID of an existing Key Vault. The role assignment is scoped to this
-    vault and nothing wider -- never to the resource group or subscription.
+    Resource ID of an existing Key Vault. The grant is scoped to this vault and
+    nothing wider -- never to the resource group or subscription.
 
-    The vault must have RBAC authorization enabled (enable_rbac_authorization =
-    true). With the legacy access-policy model these role assignments have no
-    effect and every import fails with a 403 that does not explain why.
+    Either permission model works; say which one the vault uses with
+    vault_authorization. Getting that wrong is the failure this module exists to
+    prevent: a role assignment on an access-policy vault applies cleanly, shows
+    up in the portal, and grants nothing at all.
   EOT
   type        = string
 
@@ -78,15 +79,52 @@ variable "use_import_only_role" {
     delete and purge, which this operator never uses. The custom role is the
     true least privilege; it needs permission to create role definitions at the
     subscription scope, which not every pipeline identity has.
+
+    Ignored when vault_authorization is "access-policy": roles of either kind
+    are ignored by such a vault, and the access policy it gets instead is
+    already exactly Get and Import.
   EOT
   type        = bool
   default     = false
 }
 
+variable "vault_authorization" {
+  description = <<-EOT
+    Which permission model the vault in key_vault_id uses, and therefore which
+    kind of grant the operator identity gets:
+
+      rbac          -- a role assignment (the default; enable_rbac_authorization
+                       = true on the vault)
+      access-policy -- a Key Vault access policy granting certificate Get and
+                       Import (the legacy model, still the default for a vault
+                       created without enable_rbac_authorization)
+
+    The two are not interchangeable and neither is ignored quietly by Azure: a
+    role assignment on an access-policy vault is accepted and does nothing, and
+    an access policy on an RBAC vault is likewise inert. Both cases surface only
+    later, as a 403 on import that names no cause -- so this module checks the
+    value against the vault it was pointed at and fails the plan on a mismatch.
+
+    Get and Import are the operator's entire Key Vault surface. It never lists
+    (it reads one certificate by name) and never updates (the chain digest it
+    compares against travels inside the import request), so nothing wider is
+    warranted.
+  EOT
+  type        = string
+  default     = "rbac"
+
+  validation {
+    condition     = contains(["rbac", "access-policy"], var.vault_authorization)
+    error_message = "vault_authorization must be \"rbac\" or \"access-policy\"."
+  }
+}
+
 variable "application_gateway_principal_id" {
   description = <<-EOT
     Principal (object) ID of the identity Application Gateway uses to read
-    certificates. When set, it is granted Key Vault Secrets User on the vault.
+    certificates. When set, it is granted read access to the vault's secrets --
+    Key Vault Secrets User under RBAC, secret Get as an access policy --
+    following vault_authorization like the operator's own grant.
 
     This must be a different identity from the operator's. The gateway reads
     /secrets/, the operator writes /certificates/; sharing one identity gives

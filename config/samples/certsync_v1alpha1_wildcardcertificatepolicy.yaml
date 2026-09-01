@@ -33,6 +33,13 @@ spec:
   # non-adjustable ceiling of 100.
   grouping: PerZone
 
+  # A wildcard matches exactly one label, so "*.x.com" does not cover "x.com".
+  # Seeding the apex here rather than leaving it to discovery keeps an unrelated
+  # Ingress from being load-bearing: delete the only object routing the apex and
+  # the certificate is re-issued without that SAN, under the Key Vault object
+  # name the gateway is already serving.
+  issueZoneApex: true
+
   # The issuer is referenced, never created. It must be configured with a DNS-01
   # solver: wildcards cannot use HTTP-01.
   issuerRef:
@@ -43,6 +50,19 @@ spec:
 
   keyVault:
     name: my-vault
+    # certificateName is rejected here: a policy plans one certificate per zone,
+    # so one name cannot apply to all of them. Pin them per zone instead.
+
+  # Optional, and only under grouping: PerZone. Pins the Key Vault object name a
+  # zone's certificate is imported into, for a gateway whose listeners already
+  # name what they serve -- repointing a live listener is a cutover. Unpinned
+  # zones keep the derived name, e.g. "*.x.com" becomes "wildcard-x-com".
+  #
+  # Only the vault object moves. The cert-manager Certificate, its Secret and the
+  # generated sync keep their derived names, because that is how this policy
+  # recognises its own output.
+  certificateNames:
+    x.com: ingress-certificate
 
   # Retain leaves no-longer-required certificates in place. An Application
   # Gateway listener may still be serving one whose last Ingress just vanished.

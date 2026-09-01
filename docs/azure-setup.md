@@ -12,15 +12,17 @@ All three produce the same four things:
 
 1. A user-assigned managed identity for the operator.
 2. A federated credential binding it to the operator's ServiceAccount.
-3. A Key Vault role assignment for that identity, **scoped to the vault**.
-4. A *separate* role assignment for Application Gateway's own identity.
+3. A Key Vault grant for that identity, **scoped to the vault** — a role
+   assignment or an access policy, whichever the vault's permission model
+   honours.
+4. A *separate*, narrower grant for Application Gateway's own identity.
 
 ## Prerequisites
 
 | | Why |
 |---|---|
 | AKS with `oidc_issuer_enabled` **and** `workload_identity_enabled` | Neither is on by default. Without them there is no issuer to federate against. |
-| A Key Vault with **RBAC authorization** enabled | Under the legacy access-policy model these role assignments do nothing and every import fails with an unexplained 403. |
+| A Key Vault using **RBAC authorization**, **or** an access policy granting the operator's identity certificate `Get` and `Import` | Either model works — the operator only ever makes two Key Vault data-plane calls. What does not work is a grant of the wrong kind: a role assignment on an access-policy vault applies cleanly and authorizes nothing. |
 | cert-manager, with a DNS-01 issuer | Wildcards cannot use HTTP-01. The operator creates `Certificate` resources; cert-manager does the issuing and owns renewal. |
 | An Application Gateway you configure yourself | The operator holds no ARM permissions and never writes gateway config. |
 
@@ -45,7 +47,12 @@ module "certoperator_identity" {
   key_vault_id        = data.azurerm_key_vault.this.id
   oidc_issuer_url     = data.azurerm_kubernetes_cluster.this.oidc_issuer_url
 
-  # Optional: grant the gateway's identity Key Vault Secrets User at the same time.
+  # "rbac" (the default) or "access-policy". It is checked against the vault
+  # before anything is created, because Azure accepts the wrong one silently.
+  vault_authorization = "rbac"
+
+  # Optional: grant the gateway's identity read access to the vault's secrets at
+  # the same time, under the same permission model.
   application_gateway_principal_id = azurerm_user_assigned_identity.appgw.principal_id
 }
 
@@ -83,12 +90,17 @@ $ config/azure/setup.sh
 ```
 
 It enables the OIDC issuer and workload identity on the cluster, creates the
-identity, federates it, assigns the role, and prints the exact `helm upgrade`
+identity, federates it, makes the grant, and prints the exact `helm upgrade`
 command to run — including `--set serviceAccount.name=...`, which is pinned so
 the name cannot drift from the federated subject.
 
+It asks the vault which permission model it uses and grants accordingly: a role
+assignment, or an access policy carrying certificate `Get` and `Import`. Set
+`VAULT_AUTHORIZATION=rbac` or `access-policy` to state it instead, and the
+script refuses a vault that disagrees rather than making an inert grant.
+
 Set `USE_CUSTOM_ROLE=1` for the import-only role instead of Certificates
-Officer.
+Officer. It has no effect on an access-policy vault, which ignores roles.
 
 ## What the pieces actually are
 
@@ -110,13 +122,31 @@ ServiceAccount, and the `azure.workload.identity/use: "true"` label on the pod.
 Without the label the webhook skips the pod entirely and the operator fails at
 its next restart rather than at deploy time.
 
-### The operator's role
+### The operator's grant
 
-**Key Vault Certificates Officer**, scoped to the vault. It is the only built-in
-role carrying `certificates/import`.
+Two Key Vault calls, and nothing else: `GetCertificate` and
+`ImportCertificate`. There is no resource-manager SDK in the binary, so the
+operator cannot read `enableRbacAuthorization` and does not care which
+permission model the vault uses — only the grant differs.
 
-It also grants delete and purge, which this operator never uses. For true least
-privilege use the import-only role
+**Under an access policy**, that grant is certificate `Get` and `Import`:
+
+```console
+$ az keyvault set-policy --name my-vault \
+    --object-id <operator-identity-principal-id> \
+    --certificate-permissions get import
+```
+
+Not `list`: the operator reads one certificate by name and there is no pager
+anywhere in it. Not `update`: the chain digest it compares against travels
+inside the import request, not as a separate tag write. Note that `set-policy`
+*replaces* that principal's entry rather than merging into it.
+
+**Under Azure RBAC**, it is **Key Vault Certificates Officer**, scoped to the
+vault. That is the only built-in role carrying `certificates/import`.
+
+Officer also grants delete and purge, which this operator never uses. For true
+least privilege use the import-only role
 ([`config/azure/keyvault-import-only-role.json`](../config/azure/keyvault-import-only-role.json),
 or `use_import_only_role = true` in Terraform), which grants exactly:
 
@@ -135,24 +165,29 @@ that would expose private keys.
 
 ### Application Gateway's identity
 
-A **different** identity, with a **narrower** role: **Key Vault Secrets User**.
+A **different** identity, with a **narrower** grant: **Key Vault Secrets User**
+under RBAC, or secret `Get` as an access policy.
 
-The gateway reads the certificate through `/secrets/`, not `/certificates/`, so
-Certificates User does not work and Secrets Officer is more than it needs. Never
-share one identity between the operator and the gateway — the operator writes
+The gateway reads the certificate through `/secrets/`, not `/certificates/` —
+even though the object was uploaded as a certificate — so Certificates User does
+not work, Secrets Officer is more than it needs, and an access policy carrying
+certificate permissions instead fails exactly like no policy at all. Never share
+one identity between the operator and the gateway: the operator writes
 certificates, the gateway only reads the secret behind one.
 
 ### Bounding which vault the operator may write to
 
-Azure RBAC scopes what the identity *can* do. It does not scope what a cluster
-user may *ask* for: `spec.keyVault` is chosen per-resource, and `vaultURL`
-accepts any Key Vault host. Without a bound, anyone who can create a
+The Azure grant scopes what the identity *can* do. It does not scope what a
+cluster user may *ask* for: `spec.keyVault` is chosen per-resource, and
+`vaultURL` accepts any Key Vault host. Without a bound, anyone who can create a
 `KeyVaultCertificateSync` in a watched namespace can name a vault the operator
 was never granted.
 
 Azure still refuses the write, so nothing leaks — but the operator has by then
-connected to that host, and the resulting 403 looks like a transient fault, so
-it backs off against a misconfiguration that will never resolve itself.
+connected to that host and authenticated against it, and the failure it reports
+is `VaultAccessDenied`, which describes a permission nobody ever intended to
+grant. The allowlist turns that into the truth: the vault is not one this
+operator is for.
 
 Set the allowlist to the vault the identity was actually granted:
 
@@ -165,9 +200,9 @@ A resource naming any other vault then fails immediately with
 `Ready=False, Reason=ConfigInvalid`, and nothing is issued for it.
 
 The Terraform module wires this for you — `helm_values` carries the same vault
-the role assignment was scoped to, so the Azure grant and the Kubernetes bound
-come from one source and cannot disagree. Names and full URLs are equivalent,
-so `my-vault` and `https://my-vault.vault.azure.net` both work.
+the grant was scoped to, so the Azure grant and the Kubernetes bound come from
+one source and cannot disagree. Names and full URLs are equivalent, so
+`my-vault` and `https://my-vault.vault.azure.net` both work.
 
 Empty (the default) permits any vault the identity has rights on, which is the
 behaviour that existed before this setting.
@@ -263,9 +298,9 @@ and Microsoft documents that a token request made minutes after creating one can
 fail with AADSTS70021 while caches still hold old data. The operator retries
 with backoff. Do not go looking for a misconfiguration on a brand-new identity.
 
-### A sync resource sits on SourceNotFound and the Secret plainly exists
+### A sync resource reports SourceSecretNotVisible
 
-The Secret is missing the label `certsync.vileend.io/managed=true`.
+The Secret is there; it is missing the label `certsync.vileend.io/managed=true`.
 
 This looks like a bug and is not one. The operator's Secret cache is scoped by
 that label **at the watch level**, not filtered afterwards:
@@ -277,11 +312,21 @@ that label **at the watch level**, not filtered afterwards:
 },
 ```
 
-An unlabelled Secret is never transmitted to the operator at all, so from its
-point of view the Secret genuinely does not exist. That is the same mechanism
-that keeps unrelated private keys out of the operator's memory, so it is worth
-keeping — but it does mean the failure reads as "missing" rather than
-"not permitted".
+An unlabelled Secret is never transmitted to the operator at all — the same
+mechanism that keeps unrelated private keys out of its memory. So the operator
+answers the question the cache cannot: on a cache miss it re-reads the Secret's
+**metadata only** straight from the API server, and reports
+`SourceSecretNotVisible` naming the label when the object is really there.
+`SourceNotFound` now means what it says — nothing has issued this Secret yet —
+which is the state a sync sits in while it waits for cert-manager.
+
+Adding the label is the whole fix, and it needs no other nudge: labelling moves
+the Secret into the watch, and the resulting event wakes the controller.
+
+> Both reasons are terminal, and neither is retried on a backoff. A Secret that
+> does not exist and a Secret outside the cache are both states that only a
+> change in the cluster resolves — and each of those changes produces the watch
+> event that starts the next reconcile.
 
 How the label gets there depends on where the Secret came from:
 
@@ -335,14 +380,46 @@ fresh one:
 $ az keyvault certificate set-attributes --vault-name my-vault -n wildcard-x-com --enabled true
 ```
 
-### Imports fail with 403 and the role assignment looks correct
+### Ready is False with reason VaultAccessDenied
 
-Check that the vault has RBAC authorization enabled. Under the legacy
-access-policy model, role assignments are simply ignored.
+Key Vault answered 401 or 403. The condition message names the certificate, the
+vault and the permission that was being exercised — `certificates/get` or
+`certificates/import`, which are commonly granted apart, so a vault that reads
+fine can still refuse every import.
+
+It is reported separately from `VaultError` and is **not** retried, because a
+permission that was never granted does not appear on the next attempt; retrying
+it on a backoff is what made a misconfigured vault look like throttling.
+
+The usual cause is a grant of the wrong kind. Ask the vault which model it is
+actually using:
 
 ```console
 $ az keyvault show -n my-vault --query properties.enableRbacAuthorization
 ```
+
+`true` means role assignments apply and access policies are ignored; `false` or
+`null` means the reverse — a role assignment there is accepted by ARM, appears
+in the portal, and authorizes nothing. Then check the matching side:
+
+```console
+$ az role assignment list --scope $(az keyvault show -n my-vault --query id -o tsv) \
+    --assignee <operator-identity-principal-id> -o table
+$ az keyvault show -n my-vault \
+    --query "properties.accessPolicies[?objectId=='<operator-identity-principal-id>'].permissions.certificates"
+```
+
+The second must contain `get` and `import`. The Terraform module refuses to
+plan a grant the vault would ignore, and `config/azure/setup.sh` asks the vault
+before granting, so this failure mostly belongs to hand-made setups.
+
+### Ready is False with reason EncodingFailed
+
+The PKCS#12 archive could not be built from the Secret, which happens entirely
+inside the operator, before a single byte is sent. Key Vault is the one
+component this says nothing about — do not go looking in Azure. The message
+carries the encoder's own error and the `syncPolicy.pkcs12Profile` it was
+working under, which is the pair worth quoting if you report it.
 
 ### The listener went down and recovered on its own hours later
 

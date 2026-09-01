@@ -7,9 +7,10 @@
 # over network_acls is worse than no module. See examples/aks for the whole
 # picture assembled from parts.
 
-# Reading the vault back gives us its URI for the allowlist, and fails the plan
-# early with a clear message if key_vault_id points at something that is not a
-# vault or is not visible to this identity.
+# Reading the vault back gives us its URI for the allowlist, its tenant for an
+# access policy, and the permission model the grants below are checked against.
+# It also fails the plan early with a clear message if key_vault_id points at
+# something that is not a vault or is not visible to this identity.
 data "azurerm_key_vault" "target" {
   name                = reverse(split("/", var.key_vault_id))[0]
   resource_group_name = split("/", var.key_vault_id)[4]
@@ -45,7 +46,10 @@ resource "azurerm_federated_identity_credential" "operator" {
 # idempotent -- every call mints a permanent version, versions cannot be
 # deleted, and past 500 the vault can no longer be backed up.
 resource "azurerm_role_definition" "importer" {
-  count = var.use_import_only_role ? 1 : 0
+  # Off under access policies as well: a role definition nobody can be assigned
+  # is just a subscription-scoped object left behind by a plan that had no use
+  # for it.
+  count = var.vault_authorization == "rbac" && var.use_import_only_role ? 1 : 0
 
   name        = "Key Vault Certificate Importer (${var.identity_name})"
   scope       = var.key_vault_id
@@ -65,6 +69,8 @@ resource "azurerm_role_definition" "importer" {
 }
 
 resource "azurerm_role_assignment" "operator" {
+  count = var.vault_authorization == "rbac" ? 1 : 0
+
   scope        = var.key_vault_id
   principal_id = azurerm_user_assigned_identity.operator.principal_id
   # A freshly created managed identity may not have replicated through Entra
@@ -76,16 +82,68 @@ resource "azurerm_role_assignment" "operator" {
 
   role_definition_name = var.use_import_only_role ? null : "Key Vault Certificates Officer"
   role_definition_id   = var.use_import_only_role ? azurerm_role_definition.importer[0].role_definition_resource_id : null
+
+  lifecycle {
+    # The vault answers a role assignment it does not honour with silence, so
+    # this is the only place the mistake can still be cheap. Without the check
+    # the apply succeeds, the portal shows the assignment, and the first sign of
+    # trouble is a 403 on import hours later.
+    precondition {
+      condition     = data.azurerm_key_vault.target.rbac_authorization_enabled
+      error_message = "This vault uses access policies, where role assignments are ignored. Set vault_authorization = \"access-policy\"."
+    }
+  }
+}
+
+# The access-policy half of the same grant. Certificates Get and Import, which
+# is the operator's whole Key Vault surface: it reads one certificate by name
+# before deciding whether to import, so it never lists, and the chain digest it
+# compares against is a tag inside the import request rather than an update.
+#
+# This adds one entry to a vault someone else owns. A vault whose own resource
+# declares inline access_policy blocks cannot be extended this way -- the two
+# representations overwrite each other on every apply -- so such a vault needs
+# the entry added where the vault itself is defined.
+resource "azurerm_key_vault_access_policy" "operator" {
+  count = var.vault_authorization == "access-policy" ? 1 : 0
+
+  key_vault_id = var.key_vault_id
+  # The vault's tenant, not the identity's: an access policy entry is only ever
+  # evaluated in the tenant the vault belongs to.
+  tenant_id = data.azurerm_key_vault.target.tenant_id
+  object_id = azurerm_user_assigned_identity.operator.principal_id
+
+  certificate_permissions = ["Get", "Import"]
+
+  lifecycle {
+    precondition {
+      condition     = !data.azurerm_key_vault.target.rbac_authorization_enabled
+      error_message = "This vault uses Azure RBAC, where access policies are ignored. Leave vault_authorization at its default, \"rbac\"."
+    }
+  }
 }
 
 # Application Gateway reads the certificate through /secrets/, not
 # /certificates/, so Secrets User is its true minimum -- Certificates User does
-# not work, and Secrets Officer is more than it needs.
+# not work, and Secrets Officer is more than it needs. Azure's own
+# troubleshooting guide names the access-policy equivalent as secret Get, and
+# says outright that a policy carrying certificate permissions instead is the
+# same failure.
 resource "azurerm_role_assignment" "application_gateway" {
-  count = var.application_gateway_principal_id == null ? 0 : 1
+  count = var.application_gateway_principal_id != null && var.vault_authorization == "rbac" ? 1 : 0
 
   scope                            = var.key_vault_id
   principal_id                     = var.application_gateway_principal_id
   skip_service_principal_aad_check = true
   role_definition_name             = "Key Vault Secrets User"
+}
+
+resource "azurerm_key_vault_access_policy" "application_gateway" {
+  count = var.application_gateway_principal_id != null && var.vault_authorization == "access-policy" ? 1 : 0
+
+  key_vault_id = var.key_vault_id
+  tenant_id    = data.azurerm_key_vault.target.tenant_id
+  object_id    = var.application_gateway_principal_id
+
+  secret_permissions = ["Get"]
 }

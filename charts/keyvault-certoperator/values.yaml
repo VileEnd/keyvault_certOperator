@@ -24,8 +24,10 @@ fullnameOverride: ""
 replicaCount: 1
 
 azure:
-  # Client ID of the user-assigned managed identity holding
-  # "Key Vault Certificates Officer" on the target vault. Required.
+  # Client ID of the user-assigned managed identity allowed to read and import
+  # certificates on the target vault -- "Key Vault Certificates Officer" under
+  # Azure RBAC, or an access policy carrying certificate Get and Import.
+  # Required.
   clientId: ""
   # Tenant ID. Optional: the workload identity webhook supplies a default.
   tenantId: ""
@@ -36,9 +38,10 @@ azure:
   #
   # Set this to the same vault the managed identity was granted. Without it the
   # vault is chosen entirely by whoever writes the custom resource, and a
-  # resource naming another vault produces a 403 the operator treats as
-  # retryable -- so it backs off forever against something that will never fix
-  # itself. With it, that resource fails immediately as ConfigInvalid.
+  # resource naming another vault is answered by that vault with a 403 -- which
+  # the operator can only report as VaultAccessDenied, a permission problem on a
+  # vault nobody meant to use. With it, the resource fails as ConfigInvalid
+  # before the operator ever connects, naming the bound it crossed.
   #
   # Empty permits any vault the identity has rights on, which is the behaviour
   # that existed before this value.
@@ -112,7 +115,18 @@ extraEnv: []
   # - name: HTTPS_PROXY
   #   value: http://proxy.internal:3128
 
-nodeSelector: {}
+# Linux by default, because this is a Linux-only image and an AKS cluster with
+# Windows node pools -- the mixed cluster behind an Application Gateway that
+# this operator exists for -- will otherwise happily schedule it onto a Windows
+# node, where the container never starts and there are no logs to read.
+#
+# Helm merges maps key by key, so extra selectors add to this one. To drop it
+# entirely, set the key to null:
+#
+#   nodeSelector:
+#     kubernetes.io/os: null
+nodeSelector:
+  kubernetes.io/os: linux
 tolerations: []
 affinity: {}
 podAnnotations: {}
