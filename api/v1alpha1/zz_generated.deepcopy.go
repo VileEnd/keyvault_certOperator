@@ -399,6 +399,13 @@ func (in *WildcardCertificatePolicySpec) DeepCopyInto(out *WildcardCertificatePo
 	}
 	out.IssuerRef = in.IssuerRef
 	out.KeyVault = in.KeyVault
+	if in.CertificateNames != nil {
+		in, out := &in.CertificateNames, &out.CertificateNames
+		*out = make(map[string]VaultObjectName, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
 	if in.SyncPolicy != nil {
 		in, out := &in.SyncPolicy, &out.SyncPolicy
 		*out = new(SyncPolicySpec)

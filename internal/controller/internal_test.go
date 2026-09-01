@@ -3,6 +3,7 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -11,7 +12,10 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/VileEnd/keyvault_certOperator/api/v1alpha1"
 	"github.com/VileEnd/keyvault_certOperator/internal/app"
@@ -263,6 +267,63 @@ func TestRecordPlanStaysWithinWhatTheCRDAccepts(t *testing.T) {
 	}
 	if got, want := policy.Status.RequiredCertificateCount, int32(zones); got != want {
 		t.Errorf("requiredCertificateCount = %d, want %d", got, want)
+	}
+}
+
+// A pinned name has to reach Key Vault without moving anything the policy
+// recognises its own output by. The sync resource is one of those things: it is
+// looked up by the derived name, so renaming it would leave the existing one
+// orphaned and create a second sync writing the same vault object.
+func TestEnsureSyncPinsOnlyTheKeyVaultObjectName(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("building scheme: %v", err)
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	r := &WildcardCertificatePolicyReconciler{Client: c, Scheme: scheme}
+
+	policy := &v1alpha1.WildcardCertificatePolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "adopted"},
+		Spec: v1alpha1.WildcardCertificatePolicySpec{
+			CertificateNamespace: "cert-system",
+			KeyVault:             v1alpha1.KeyVaultSpec{Name: "my-vault"},
+			CertificateNames:     map[string]v1alpha1.VaultObjectName{"x.com": "ingress-certificate"},
+		},
+	}
+	if err := r.ensureSync(t.Context(), policy, app.DesiredCertificate{
+		CertificateRequest: domain.CertificateRequest{
+			Name: "wildcard-x-com", VaultName: "ingress-certificate", Zone: "x.com",
+			DNSNames: []string{"*.x.com", "x.com"},
+		},
+		SecretName: "wildcard-x-com-tls",
+	}); err != nil {
+		t.Fatalf("ensureSync: %v", err)
+	}
+
+	var sync v1alpha1.KeyVaultCertificateSync
+	key := client.ObjectKey{Namespace: "cert-system", Name: "wildcard-x-com"}
+	if err := c.Get(t.Context(), key, &sync); err != nil {
+		t.Fatalf("the sync resource is not named after the derived certificate: %v", err)
+	}
+	if got := sync.Spec.KeyVault.CertificateName; got != "ingress-certificate" {
+		t.Errorf("certificateName = %q, want the pinned ingress-certificate", got)
+	}
+	if got := sync.Spec.Source.SecretRef.Name; got != "wildcard-x-com-tls" {
+		t.Errorf("secretRef = %q, want the derived wildcard-x-com-tls", got)
+	}
+}
+
+func TestPinnedVaultNamesDropsTheAPIType(t *testing.T) {
+	t.Parallel()
+	// nil rather than an empty map, so an unpinned policy plans exactly as it
+	// did before the field existed.
+	if got := pinnedVaultNames(nil); got != nil {
+		t.Errorf("pinnedVaultNames(nil) = %v, want nil", got)
+	}
+	got := pinnedVaultNames(map[string]v1alpha1.VaultObjectName{"x.com": "ingress-certificate"})
+	if want := map[string]string{"x.com": "ingress-certificate"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("pinnedVaultNames() = %v, want %v", got, want)
 	}
 }
 

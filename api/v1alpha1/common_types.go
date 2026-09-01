@@ -90,6 +90,10 @@ type KeyVaultSpec struct {
 	// "foo.example.com" and "foo-example.com" derive "foo-example-com". Set this
 	// explicitly when that matters -- an Application Gateway listener references
 	// the name, so a silent change would be an outage.
+	//
+	// A WildcardCertificatePolicy rejects this field: it plans one certificate
+	// per zone, so one name cannot apply to all of them. Pin the names there
+	// with spec.certificateNames, which is keyed by zone.
 	// +optional
 	// +kubebuilder:validation:Pattern=`^[a-zA-Z][a-zA-Z0-9-]{0,126}$`
 	CertificateName string `json:"certificateName,omitempty"`

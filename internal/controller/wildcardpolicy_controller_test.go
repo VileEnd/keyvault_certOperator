@@ -555,3 +555,161 @@ func TestPolicyPrunesWhenDiscoveryOmitsTheUnavailableSource(t *testing.T) {
 		return nil
 	})
 }
+
+// A platform adopting this operator cannot rename the Key Vault objects its
+// Application Gateway listeners already reference -- that is a live cutover --
+// so the policy has to write the names it is handed. The plan also has to hold
+// the apex without help from discovery: leaving it to an Ingress means deleting
+// that Ingress re-issues the same Key Vault object without the apex SAN.
+func TestPolicyPinsTheKeyVaultObjectNameAndSeedsTheApex(t *testing.T) {
+	requireEnvtest(t)
+	ctx := t.Context()
+	const certs = "policy-pinned-certs"
+
+	if err := k8sClient.Create(ctx, newNamespace(certs)); err != nil {
+		t.Fatalf("creating namespace %s: %v", certs, err)
+	}
+
+	policy := &v1alpha1.WildcardCertificatePolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "pinned"},
+		Spec: v1alpha1.WildcardCertificatePolicySpec{
+			Zones:           []string{"pinned.com"},
+			MaxCertificates: 10,
+			// Grouping is left to its default on purpose: pinning is accepted
+			// only under PerZone, and an adopter writes the shape without it.
+			IssueZoneWildcards:   true,
+			IssueZoneApex:        true,
+			IssuerRef:            v1alpha1.IssuerReference{Name: "letsencrypt-dns", Kind: "ClusterIssuer", Group: "cert-manager.io"},
+			CertificateNamespace: certs,
+			KeyVault:             v1alpha1.KeyVaultSpec{Name: "my-vault"},
+			CertificateNames:     map[string]v1alpha1.VaultObjectName{"pinned.com": "ingress-certificate"},
+			OrphanPolicy:         v1alpha1.OrphanRetain,
+		},
+	}
+	if err := k8sClient.Create(ctx, policy); err != nil {
+		t.Fatalf("creating policy: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, policy) })
+
+	// Nothing in this test routes anything: both SANs come from the seeding.
+	certKey := client.ObjectKey{Namespace: certs, Name: "wildcard-pinned-com"}
+	eventually(t, 30*time.Second, func() error {
+		var cert cmapi.Certificate
+		if err := k8sClient.Get(ctx, certKey, &cert); err != nil {
+			return err
+		}
+		want := []string{"*.pinned.com", "pinned.com"}
+		got := slices.Clone(cert.Spec.DNSNames)
+		slices.Sort(got)
+		if !slices.Equal(got, want) {
+			return fmt.Errorf("dnsNames = %v, want %v", got, want)
+		}
+		return nil
+	})
+
+	// The sync resource keeps the derived name -- renaming it would orphan the
+	// one already generated -- while the vault object follows the pin.
+	eventually(t, 30*time.Second, func() error {
+		var sync v1alpha1.KeyVaultCertificateSync
+		if err := k8sClient.Get(ctx, certKey, &sync); err != nil {
+			return err
+		}
+		if sync.Spec.KeyVault.CertificateName != "ingress-certificate" {
+			return fmt.Errorf("certificateName = %q, want ingress-certificate", sync.Spec.KeyVault.CertificateName)
+		}
+		return nil
+	})
+
+	eventually(t, 30*time.Second, func() error {
+		var got v1alpha1.WildcardCertificatePolicy
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), &got); err != nil {
+			return err
+		}
+		if !meta.IsStatusConditionTrue(got.Status.Conditions, v1alpha1.ConditionReady) {
+			return fmt.Errorf("not ready: %+v", got.Status.Conditions)
+		}
+		if len(got.Status.RequiredCertificates) != 1 {
+			return fmt.Errorf("requiredCertificates = %+v, want one", got.Status.RequiredCertificates)
+		}
+		// The listener is configured from the secret identifier, so that is the
+		// field that has to carry the pinned name; the reported certificate name
+		// is the cluster-side one and stays derived.
+		planned := got.Status.RequiredCertificates[0]
+		if planned.Name != "wildcard-pinned-com" {
+			return fmt.Errorf("requiredCertificates[0].name = %q, want the derived name", planned.Name)
+		}
+		want := "https://my-vault.vault.azure.net/secrets/ingress-certificate"
+		if planned.SecretIdentifier != want {
+			return fmt.Errorf("secretIdentifier = %q, want %q", planned.SecretIdentifier, want)
+		}
+		return nil
+	})
+}
+
+// Rejected at admission rather than reported in status. Each of these used to
+// be accepted and then quietly not done, which leaves a Ready policy writing a
+// Key Vault object no listener reads -- the one failure an adopter cannot see.
+func TestPolicyRejectsANameItCannotHonour(t *testing.T) {
+	requireEnvtest(t)
+	ctx := t.Context()
+
+	base := func() *v1alpha1.WildcardCertificatePolicySpec {
+		return &v1alpha1.WildcardCertificatePolicySpec{
+			Zones:                []string{"rejected.com"},
+			MaxCertificates:      10,
+			Grouping:             v1alpha1.GroupingPerZone,
+			IssuerRef:            v1alpha1.IssuerReference{Name: "letsencrypt-dns", Kind: "ClusterIssuer", Group: "cert-manager.io"},
+			CertificateNamespace: "policy-rejected-certs",
+			KeyVault:             v1alpha1.KeyVaultSpec{Name: "my-vault"},
+		}
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*v1alpha1.WildcardCertificatePolicySpec)
+	}{
+		{
+			// The field is real on a KeyVaultCertificateSync, which is how it
+			// reached this kind: they share the struct.
+			name: "the shared certificateName, which a policy cannot apply",
+			mutate: func(spec *v1alpha1.WildcardCertificatePolicySpec) {
+				spec.KeyVault.CertificateName = "ingress-certificate"
+			},
+		},
+		{
+			// A zone has several certificates under PerWildcard, so a name keyed
+			// by zone would name whichever one the operator picked.
+			name: "a pin under PerWildcard grouping",
+			mutate: func(spec *v1alpha1.WildcardCertificatePolicySpec) {
+				spec.Grouping = v1alpha1.GroupingPerWildcard
+				spec.CertificateNames = map[string]v1alpha1.VaultObjectName{"rejected.com": "ingress-certificate"}
+			},
+		},
+		{
+			// Azure would refuse the import, hours after issuance.
+			name: "a pinned name Key Vault would refuse",
+			mutate: func(spec *v1alpha1.WildcardCertificatePolicySpec) {
+				spec.CertificateNames = map[string]v1alpha1.VaultObjectName{"rejected.com": "9-ingress"}
+			},
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := base()
+			tc.mutate(spec)
+			policy := &v1alpha1.WildcardCertificatePolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("rejected-%d", i)},
+				Spec:       *spec,
+			}
+			err := k8sClient.Create(ctx, policy)
+			if err == nil {
+				_ = k8sClient.Delete(ctx, policy)
+				t.Fatal("the API server accepted a policy whose name could never be honoured")
+			}
+			if !apierrors.IsInvalid(err) {
+				t.Fatalf("creating policy: %v, want an Invalid error", err)
+			}
+		})
+	}
+}

@@ -67,9 +67,57 @@ spec:
           metadata:
             type: object
           spec:
-            description: WildcardCertificatePolicySpec describes which wildcards the
-              cluster needs.
+            description: |-
+              WildcardCertificatePolicySpec describes which wildcards the cluster needs.
+
+              The first validation rule below closes a trap rather than adding a feature.
+              keyVault is the same struct a KeyVaultCertificateSync uses, so its
+              certificateName was accepted here and then discarded -- a policy plans one
+              certificate per zone, and one name cannot apply to all of them. The discard
+              was silent, which is the worst shape it could take: a green, Ready policy
+              writing a Key Vault object no Application Gateway listener reads. A degraded
+              condition would still leave a window in which that object is written, so the
+              field is refused outright and the message names certificateNames instead. The
+              cost is that a policy already stored with it set has to drop it before it can
+              be updated again; validation ratcheting (Kubernetes 1.30+) limits that to
+              updates which touch the spec.
             properties:
+              certificateNames:
+                additionalProperties:
+                  description: |-
+                    VaultObjectName is a Key Vault object name: 1-127 characters of letters,
+                    digits and hyphens, starting with a letter. It mirrors
+                    domain.ValidateVaultCertificateName, so a name the API server accepts is one
+                    Azure accepts.
+                  maxLength: 127
+                  pattern: ^[a-zA-Z][a-zA-Z0-9-]{0,126}$
+                  type: string
+                description: |-
+                  CertificateNames pins the Key Vault object name a zone's certificate is
+                  imported into, keyed by zone. Unpinned zones keep the name derived from
+                  the certificate's SANs, e.g. "*.x.com" becomes "wildcard-x-com".
+
+                  This exists for adoption. An Application Gateway listener references a
+                  Key Vault object by name, and repointing a live listener is a cutover, so
+                  a platform moving onto this operator needs the certificate to land on the
+                  name it already serves -- "ingress-certificate" -- rather than on the
+                  derived one.
+
+                  Only the Key Vault object name changes. The cert-manager Certificate, its
+                  Secret and the generated KeyVaultCertificateSync keep their derived names,
+                  because that is how this policy recognises its own output: renaming them
+                  would orphan everything already issued and re-issue the lot against Let's
+                  Encrypt's duplicate-certificate limit. status.requiredCertificates[].name
+                  therefore stays derived too, while the secretIdentifier beside it -- the
+                  value the listener is configured with -- carries the pinned name.
+
+                  Every key must be a zone from Zones, and no two zones may pin the same
+                  name: one Key Vault object cannot hold two different certificates. A zone
+                  with nothing planned yet is not an error, it simply has no certificate to
+                  name; issueZoneWildcards makes the zone's certificate exist regardless of
+                  what the cluster routes.
+                maxProperties: 50
+                type: object
               certificateNamespace:
                 description: |-
                   CertificateNamespace is where the cert-manager Certificate resources, the
@@ -175,6 +223,21 @@ spec:
                 - PerZone
                 - PerWildcard
                 type: string
+              issueZoneApex:
+                default: false
+                description: |-
+                  IssueZoneApex covers the bare zone -- "x.com" as well as "*.x.com" -- for
+                  every zone in Zones.
+
+                  A wildcard matches exactly one label, so it does not cover its own apex.
+                  Without this the apex is a SAN only while some Ingress, HTTPRoute or
+                  Gateway happens to route it, which makes an unrelated routing object
+                  load-bearing: deleting it re-issues the certificate without the apex,
+                  under the same Key Vault object name the gateway is already serving.
+
+                  It is independent of IssueZoneWildcards. Either flag seeds its own name,
+                  so the apex can be covered on its own, and the two together seed both.
+                type: boolean
               issueZoneWildcards:
                 default: false
                 description: |-
@@ -229,6 +292,10 @@ spec:
                       "foo.example.com" and "foo-example.com" derive "foo-example-com". Set this
                       explicitly when that matters -- an Application Gateway listener references
                       the name, so a silent change would be an outage.
+
+                      A WildcardCertificatePolicy rejects this field: it plans one certificate
+                      per zone, so one name cannot apply to all of them. Pin the names there
+                      with spec.certificateNames, which is keyed by zone.
                     pattern: ^[a-zA-Z][a-zA-Z0-9-]{0,126}$
                     type: string
                   cloud:
@@ -333,6 +400,15 @@ spec:
             - keyVault
             - zones
             type: object
+            x-kubernetes-validations:
+            - message: spec.keyVault.certificateName is ignored by a policy, which
+                plans one certificate per zone; pin the Key Vault object name per
+                zone with spec.certificateNames
+              rule: '!has(self.keyVault.certificateName)'
+            - message: 'spec.certificateNames requires grouping: PerZone, the only
+                grouping where a zone has exactly one certificate to name'
+              rule: '!has(self.certificateNames) || (has(self.grouping) && self.grouping
+                == ''PerZone'')'
           status:
             description: WildcardCertificatePolicyStatus reports the observed state
               of discovery.
@@ -480,8 +556,10 @@ spec:
                       maxItems: 100
                       type: array
                     name:
-                      description: Name is the cert-manager Certificate and Key Vault
-                        certificate name.
+                      description: |-
+                        Name is the cert-manager Certificate and the generated sync resource. The
+                        Key Vault object it imports into is the last path element of
+                        SecretIdentifier, which spec.certificateNames may pin to another name.
                       type: string
                     secretIdentifier:
                       description: SecretIdentifier is the versionless Key Vault URI

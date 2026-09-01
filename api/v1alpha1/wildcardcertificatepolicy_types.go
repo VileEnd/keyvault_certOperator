@@ -111,7 +111,29 @@ type DiscoverySpec struct {
 	NamespaceSelector *metav1.LabelSelector `json:"namespaceSelector,omitempty"`
 }
 
+// VaultObjectName is a Key Vault object name: 1-127 characters of letters,
+// digits and hyphens, starting with a letter. It mirrors
+// domain.ValidateVaultCertificateName, so a name the API server accepts is one
+// Azure accepts.
+// +kubebuilder:validation:Pattern=`^[a-zA-Z][a-zA-Z0-9-]{0,126}$`
+// +kubebuilder:validation:MaxLength=127
+type VaultObjectName string
+
 // WildcardCertificatePolicySpec describes which wildcards the cluster needs.
+//
+// The first validation rule below closes a trap rather than adding a feature.
+// keyVault is the same struct a KeyVaultCertificateSync uses, so its
+// certificateName was accepted here and then discarded -- a policy plans one
+// certificate per zone, and one name cannot apply to all of them. The discard
+// was silent, which is the worst shape it could take: a green, Ready policy
+// writing a Key Vault object no Application Gateway listener reads. A degraded
+// condition would still leave a window in which that object is written, so the
+// field is refused outright and the message names certificateNames instead. The
+// cost is that a policy already stored with it set has to drop it before it can
+// be updated again; validation ratcheting (Kubernetes 1.30+) limits that to
+// updates which touch the spec.
+// +kubebuilder:validation:XValidation:rule="!has(self.keyVault.certificateName)",message="spec.keyVault.certificateName is ignored by a policy, which plans one certificate per zone; pin the Key Vault object name per zone with spec.certificateNames"
+// +kubebuilder:validation:XValidation:rule="!has(self.certificateNames) || (has(self.grouping) && self.grouping == 'PerZone')",message="spec.certificateNames requires grouping: PerZone, the only grouping where a zone has exactly one certificate to name"
 type WildcardCertificatePolicySpec struct {
 	// Zones is the allowlist of DNS zones issuance may happen inside. It is
 	// required and has no permissive default.
@@ -141,6 +163,21 @@ type WildcardCertificatePolicySpec struct {
 	// +optional
 	// +kubebuilder:default=false
 	IssueZoneWildcards bool `json:"issueZoneWildcards,omitempty"`
+
+	// IssueZoneApex covers the bare zone -- "x.com" as well as "*.x.com" -- for
+	// every zone in Zones.
+	//
+	// A wildcard matches exactly one label, so it does not cover its own apex.
+	// Without this the apex is a SAN only while some Ingress, HTTPRoute or
+	// Gateway happens to route it, which makes an unrelated routing object
+	// load-bearing: deleting it re-issues the certificate without the apex,
+	// under the same Key Vault object name the gateway is already serving.
+	//
+	// It is independent of IssueZoneWildcards. Either flag seeds its own name,
+	// so the apex can be covered on its own, and the two together seed both.
+	// +optional
+	// +kubebuilder:default=false
+	IssueZoneApex bool `json:"issueZoneApex,omitempty"`
 
 	// MaxCertificates caps how many certificates may be planned. The overflow is
 	// reported in status rather than issued.
@@ -182,6 +219,33 @@ type WildcardCertificatePolicySpec struct {
 	// +required
 	KeyVault KeyVaultSpec `json:"keyVault"`
 
+	// CertificateNames pins the Key Vault object name a zone's certificate is
+	// imported into, keyed by zone. Unpinned zones keep the name derived from
+	// the certificate's SANs, e.g. "*.x.com" becomes "wildcard-x-com".
+	//
+	// This exists for adoption. An Application Gateway listener references a
+	// Key Vault object by name, and repointing a live listener is a cutover, so
+	// a platform moving onto this operator needs the certificate to land on the
+	// name it already serves -- "ingress-certificate" -- rather than on the
+	// derived one.
+	//
+	// Only the Key Vault object name changes. The cert-manager Certificate, its
+	// Secret and the generated KeyVaultCertificateSync keep their derived names,
+	// because that is how this policy recognises its own output: renaming them
+	// would orphan everything already issued and re-issue the lot against Let's
+	// Encrypt's duplicate-certificate limit. status.requiredCertificates[].name
+	// therefore stays derived too, while the secretIdentifier beside it -- the
+	// value the listener is configured with -- carries the pinned name.
+	//
+	// Every key must be a zone from Zones, and no two zones may pin the same
+	// name: one Key Vault object cannot hold two different certificates. A zone
+	// with nothing planned yet is not an error, it simply has no certificate to
+	// name; issueZoneWildcards makes the zone's certificate exist regardless of
+	// what the cluster routes.
+	// +optional
+	// +kubebuilder:validation:MaxProperties=50
+	CertificateNames map[string]VaultObjectName `json:"certificateNames,omitempty"`
+
 	// OrphanPolicy decides what happens to no-longer-required certificates.
 	//
 	// Prune is guarded: pruning is judged against the current discovery pass, so
@@ -202,7 +266,9 @@ type WildcardCertificatePolicySpec struct {
 
 // PlannedCertificate is one certificate discovery decided the cluster needs.
 type PlannedCertificate struct {
-	// Name is the cert-manager Certificate and Key Vault certificate name.
+	// Name is the cert-manager Certificate and the generated sync resource. The
+	// Key Vault object it imports into is the last path element of
+	// SecretIdentifier, which spec.certificateNames may pin to another name.
 	Name string `json:"name"`
 	// Zone is the allowlisted zone it was planned under.
 	Zone string `json:"zone"`

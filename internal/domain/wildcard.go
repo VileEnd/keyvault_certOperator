@@ -29,8 +29,13 @@ const MaxListenerHostnames = 5
 // CertificateRequest is one certificate the cluster needs: a name, the zone it
 // belongs to, and the SANs it must cover.
 type CertificateRequest struct {
-	// Name is the Key Vault certificate name and the cert-manager Certificate name.
+	// Name identifies the certificate inside the cluster: the cert-manager
+	// Certificate, the Secret it writes and the sync resource generated for it
+	// are all named after this. It is always derived from the SANs.
 	Name string
+	// VaultName is the Key Vault object the certificate is imported into. It is
+	// Name unless PlanInput.CertificateNames pinned a name for the zone.
+	VaultName string
 	// Zone is the allowlisted zone this certificate was planned under.
 	Zone string
 	// DNSNames are the SANs, sorted, e.g. ["*.x.com", "x.com"].
@@ -81,6 +86,25 @@ type PlanInput struct {
 	// The seeded names go through exactly the same guards as a discovered one:
 	// the zone allowlist, the public-suffix check and the certificate cap.
 	IssueZoneWildcards bool
+	// IssueZoneApex seeds the bare zone, so "x.com" is covered as well as
+	// "*.x.com".
+	//
+	// A wildcard matches exactly one label and so never covers its own apex.
+	// Leaving the apex to discovery makes an unrelated routing object
+	// load-bearing: deleting it re-issues the certificate without the apex SAN,
+	// under the Key Vault object name the gateway is already serving.
+	//
+	// Independent of IssueZoneWildcards: each flag seeds its own name.
+	IssueZoneApex bool
+	// CertificateNames pins the Key Vault object name for a zone, keyed by zone.
+	//
+	// The derived name is right for a cluster this operator set up and wrong for
+	// one it is adopting, where an Application Gateway listener already names
+	// the object it serves and cannot be repointed without a cutover. Only
+	// CertificateRequest.VaultName follows the pin; Name stays derived, so
+	// pinning never renames -- and therefore never orphans -- resources the
+	// cluster already holds.
+	CertificateNames map[string]string
 }
 
 // Plan is the desired certificate state derived from discovered hostnames.
@@ -116,13 +140,18 @@ func BuildPlan(in PlanInput) (Plan, error) {
 	required := map[string]map[string]struct{}{}
 
 	hosts := in.Hosts
-	if in.IssueZoneWildcards {
+	if in.IssueZoneWildcards || in.IssueZoneApex {
 		// Seeded rather than special-cased downstream: "*.zone" is a hostname
 		// like any other, so it picks up the guards, the grouping and the
 		// naming without a second code path that could drift from the first.
-		seeded := make([]string, 0, len(zones)+len(hosts))
+		seeded := make([]string, 0, 2*len(zones)+len(hosts))
 		for _, zone := range zones {
-			seeded = append(seeded, "*."+zone)
+			if in.IssueZoneWildcards {
+				seeded = append(seeded, "*."+zone)
+			}
+			if in.IssueZoneApex {
+				seeded = append(seeded, zone)
+			}
 		}
 		hosts = append(seeded, hosts...)
 	}
@@ -165,6 +194,12 @@ func BuildPlan(in PlanInput) (Plan, error) {
 		for _, name := range cert.DNSNames {
 			plan.Skipped = append(plan.Skipped, SkippedHost{Host: name, Reason: ReasonMaxCertificates})
 		}
+	}
+
+	// After the cap, so an overflowed certificate -- which is never written --
+	// cannot claim a pinned name or collide with one.
+	if err := settleVaultNames(certs, in.CertificateNames, zones); err != nil {
+		return Plan{}, err
 	}
 
 	plan.Certificates = certs
@@ -262,7 +297,9 @@ func group(required map[string]map[string]struct{}, grouping Grouping) ([]Certif
 // The consequence to know about is that discovering "*.<zone>" later renames
 // the certificate, leaving the old one as an orphan. Setting
 // issueZoneWildcards pins the name, because the zone wildcard is then always
-// covered.
+// covered. PlanInput.CertificateNames pins the Key Vault object name instead,
+// which keeps a rename inside the cluster: the vault object the gateway serves
+// stays the same one and keeps being updated.
 func perZoneNameSeed(zone string, names []string) string {
 	if wildcard := "*." + zone; contains(names, wildcard) {
 		return wildcard
@@ -298,6 +335,115 @@ func resolveNameCollisions(certs []CertificateRequest) []CertificateRequest {
 		certs[i].Name = name
 	}
 	return certs
+}
+
+// settleVaultNames decides the Key Vault object name of every planned
+// certificate: the derived name, or the one the policy pinned for its zone.
+//
+// Pinning exists for adoption. A gateway that already serves
+// "ingress-certificate" cannot be repointed at "wildcard-x-com" without a
+// cutover, so the operator has to be able to write the name that is already
+// wired up. Only the vault name moves: Name keeps identifying the cluster-side
+// resources, because renaming those would orphan every certificate already
+// issued.
+//
+// It runs after resolveNameCollisions, so the derived names it starts from are
+// the final ones, and after applyLimit, so an overflowed certificate cannot
+// take a pin or collide with one.
+func settleVaultNames(certs []CertificateRequest, pinned map[string]string, zones []string) error {
+	for i := range certs {
+		certs[i].VaultName = certs[i].Name
+	}
+
+	overrides, err := normalizePins(pinned, zones)
+	if err != nil {
+		return err
+	}
+	for _, zone := range sortedKeys(overrides) {
+		target, err := pinTarget(certs, zone)
+		if err != nil {
+			return err
+		}
+		// A zone with nothing planned has no certificate to name. That is not an
+		// error: it is a zone the cluster does not route yet, and nothing has
+		// been written under the wrong name. IssueZoneWildcards makes the zone's
+		// certificate exist regardless of discovery.
+		if target >= 0 {
+			certs[target].VaultName = overrides[zone]
+		}
+	}
+	return distinctVaultNames(certs)
+}
+
+// normalizePins validates the pinned names and keys them by normalized zone.
+func normalizePins(pinned map[string]string, zones []string) (map[string]string, error) {
+	if len(pinned) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(pinned))
+	// Sorted, so a configuration with several problems always reports the same
+	// one rather than whichever the map happened to yield first.
+	for _, raw := range sortedKeys(pinned) {
+		zone := NormalizeHost(raw)
+		if !contains(zones, zone) {
+			return nil, fmt.Errorf("%w: %q is pinned a certificate name but is not a configured zone",
+				ErrInvalidZone, raw)
+		}
+		if _, dup := out[zone]; dup {
+			// "X.com" and "x.com" are one zone, so accepting both would make
+			// which name wins depend on map iteration order.
+			return nil, fmt.Errorf("%w: %q is pinned a certificate name more than once", ErrInvalidZone, zone)
+		}
+		if err := ValidateVaultCertificateName(pinned[raw]); err != nil {
+			return nil, fmt.Errorf("certificate name pinned for %q: %w", raw, err)
+		}
+		out[zone] = pinned[raw]
+	}
+	return out, nil
+}
+
+// pinTarget picks the certificate a zone's pinned name applies to, or -1 when
+// the zone has none planned.
+//
+// PerZone plans exactly one certificate per zone, which is why the CRD only
+// accepts pins under that grouping. The lookup still handles the general case:
+// the zone's own wildcard is the certificate a listener configured for the zone
+// expects, and anything beyond that is genuinely ambiguous -- two certificates
+// cannot share one Key Vault object, so guessing would silently overwrite one
+// with the other on every reconcile.
+func pinTarget(certs []CertificateRequest, zone string) (int, error) {
+	target, planned := -1, 0
+	for i, cert := range certs {
+		if cert.Zone != zone {
+			continue
+		}
+		if contains(cert.DNSNames, "*."+zone) {
+			return i, nil
+		}
+		planned++
+		target = i
+	}
+	if planned > 1 {
+		return -1, fmt.Errorf("%w: %q is pinned a certificate name, but %d certificates are planned for it "+
+			"and none covers %q", ErrInvalidVaultName, zone, planned, "*."+zone)
+	}
+	return target, nil
+}
+
+// distinctVaultNames refuses a plan in which two certificates would import into
+// one Key Vault object. The object would hold whichever was written last and
+// the listener serving it would flap between them, so this fails the plan
+// rather than issuing something that cannot work.
+func distinctVaultNames(certs []CertificateRequest) error {
+	seen := make(map[string]string, len(certs))
+	for _, cert := range certs {
+		if other, taken := seen[cert.VaultName]; taken {
+			return fmt.Errorf("%w: %q and %q would both be imported as %q",
+				ErrInvalidVaultName, other, cert.Name, cert.VaultName)
+		}
+		seen[cert.VaultName] = cert.Name
+	}
+	return nil
 }
 
 // applyLimit enforces MaxCertificates, preferring certificates that already
@@ -428,7 +574,7 @@ func partitionApex(names []string) (apexes, wildcards []string) {
 	return apexes, wildcards
 }
 
-func sortedKeys(set map[string]struct{}) []string {
+func sortedKeys[V any](set map[string]V) []string {
 	out := make([]string, 0, len(set))
 	for key := range set {
 		out = append(out, key)

@@ -92,6 +92,39 @@ func TestPlanSplitsLargeCertificatesAcrossListeners(t *testing.T) {
 	}
 }
 
+// The listener guidance has to name the Key Vault object the certificate is
+// really imported into. Reporting the derived name beside a pinned import is
+// how an adopter ends up wiring a gateway to an object that holds nothing.
+func TestPlanPointsTheListenerAtThePinnedObject(t *testing.T) {
+	t.Parallel()
+	planner := app.NewPlanner(&fakeHosts{hosts: []string{"api.x.com"}})
+
+	state, err := planner.Plan(t.Context(), app.PolicySpec{
+		Zones:            []string{"x.com"},
+		CertificateNames: map[string]string{"x.com": "ingress-certificate"},
+		VaultURL:         "https://my-vault.vault.azure.net",
+	})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(state.Certificates) != 1 {
+		t.Fatalf("certificates = %d, want 1", len(state.Certificates))
+	}
+	cert := state.Certificates[0]
+
+	if cert.SecretIdentifier != "https://my-vault.vault.azure.net/secrets/ingress-certificate" {
+		t.Errorf("secret identifier = %q, want the pinned object", cert.SecretIdentifier)
+	}
+	// The cluster-side names stay derived, so a pin never renames -- and
+	// therefore never orphans -- what has already been issued.
+	if cert.Name != "wildcard-x-com" {
+		t.Errorf("name = %q, want wildcard-x-com", cert.Name)
+	}
+	if cert.SecretName != "wildcard-x-com-tls" {
+		t.Errorf("secret name = %q, want wildcard-x-com-tls", cert.SecretName)
+	}
+}
+
 func TestPlanRequiresAZoneAllowlist(t *testing.T) {
 	t.Parallel()
 	// Without zones there is no boundary on ACME issuance, so this must fail

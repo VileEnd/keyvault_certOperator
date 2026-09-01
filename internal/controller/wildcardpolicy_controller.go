@@ -262,6 +262,8 @@ func (r *WildcardCertificatePolicyReconciler) plan(
 		Existing:           existing,
 		Grouping:           domain.Grouping(policy.Spec.Grouping),
 		IssueZoneWildcards: policy.Spec.IssueZoneWildcards,
+		IssueZoneApex:      policy.Spec.IssueZoneApex,
+		CertificateNames:   pinnedVaultNames(policy.Spec.CertificateNames),
 		VaultURL:           vaultURL,
 	})
 }
@@ -309,7 +311,10 @@ func (r *WildcardCertificatePolicyReconciler) ensureSync(
 
 		sync.Spec.Source.SecretRef.Name = cert.SecretName
 		sync.Spec.KeyVault = policy.Spec.KeyVault
-		sync.Spec.KeyVault.CertificateName = cert.Name
+		// The sync resource itself keeps the derived name it was created under,
+		// since renaming it would orphan the one already generated; only the Key
+		// Vault object it writes follows a pin from spec.certificateNames.
+		sync.Spec.KeyVault.CertificateName = cert.VaultName
 		sync.Spec.SyncPolicy = policy.Spec.SyncPolicy
 
 		return controllerutil.SetControllerReference(policy, sync, r.Scheme)
@@ -524,6 +529,19 @@ func (r *WildcardCertificatePolicyReconciler) enqueueAllPolicies() handler.Event
 		}
 		return requests
 	})
+}
+
+// pinnedVaultNames drops the API's name type, which the planner and the domain
+// deliberately know nothing about.
+func pinnedVaultNames(pinned map[string]v1alpha1.VaultObjectName) map[string]string {
+	if len(pinned) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(pinned))
+	for zone, name := range pinned {
+		out[zone] = string(name)
+	}
+	return out
 }
 
 func namespaceSelector(discovery *v1alpha1.DiscoverySpec) *metav1.LabelSelector {

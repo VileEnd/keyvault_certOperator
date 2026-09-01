@@ -25,7 +25,7 @@ func TestBuildPlanDerivesCoveringWildcards(t *testing.T) {
 			hosts: []string{"api.x.com"},
 			zones: []string{"x.com"},
 			want: []domain.CertificateRequest{
-				{Name: "wildcard-x-com", Zone: "x.com", DNSNames: []string{"*.x.com"}},
+				{Name: "wildcard-x-com", VaultName: "wildcard-x-com", Zone: "x.com", DNSNames: []string{"*.x.com"}},
 			},
 		},
 		{
@@ -33,7 +33,7 @@ func TestBuildPlanDerivesCoveringWildcards(t *testing.T) {
 			hosts: []string{"api.x.com", "x.com"},
 			zones: []string{"x.com"},
 			want: []domain.CertificateRequest{
-				{Name: "wildcard-x-com", Zone: "x.com", DNSNames: []string{"*.x.com", "x.com"}},
+				{Name: "wildcard-x-com", VaultName: "wildcard-x-com", Zone: "x.com", DNSNames: []string{"*.x.com", "x.com"}},
 			},
 		},
 		{
@@ -41,7 +41,7 @@ func TestBuildPlanDerivesCoveringWildcards(t *testing.T) {
 			hosts: []string{"api.x.com", "a.sub.x.com"},
 			zones: []string{"x.com"},
 			want: []domain.CertificateRequest{
-				{Name: "wildcard-x-com", Zone: "x.com", DNSNames: []string{"*.sub.x.com", "*.x.com"}},
+				{Name: "wildcard-x-com", VaultName: "wildcard-x-com", Zone: "x.com", DNSNames: []string{"*.sub.x.com", "*.x.com"}},
 			},
 		},
 		{
@@ -49,8 +49,8 @@ func TestBuildPlanDerivesCoveringWildcards(t *testing.T) {
 			hosts: []string{"a.sub.x.com", "b.x.com"},
 			zones: []string{"x.com", "sub.x.com"},
 			want: []domain.CertificateRequest{
-				{Name: "wildcard-sub-x-com", Zone: "sub.x.com", DNSNames: []string{"*.sub.x.com"}},
-				{Name: "wildcard-x-com", Zone: "x.com", DNSNames: []string{"*.x.com"}},
+				{Name: "wildcard-sub-x-com", VaultName: "wildcard-sub-x-com", Zone: "sub.x.com", DNSNames: []string{"*.sub.x.com"}},
+				{Name: "wildcard-x-com", VaultName: "wildcard-x-com", Zone: "x.com", DNSNames: []string{"*.x.com"}},
 			},
 		},
 		{
@@ -58,7 +58,7 @@ func TestBuildPlanDerivesCoveringWildcards(t *testing.T) {
 			hosts: []string{"a.x.com", "b.x.com", "c.x.com", "d.x.com"},
 			zones: []string{"x.com"},
 			want: []domain.CertificateRequest{
-				{Name: "wildcard-x-com", Zone: "x.com", DNSNames: []string{"*.x.com"}},
+				{Name: "wildcard-x-com", VaultName: "wildcard-x-com", Zone: "x.com", DNSNames: []string{"*.x.com"}},
 			},
 		},
 		{
@@ -66,7 +66,7 @@ func TestBuildPlanDerivesCoveringWildcards(t *testing.T) {
 			hosts: []string{"*.x.com"},
 			zones: []string{"x.com"},
 			want: []domain.CertificateRequest{
-				{Name: "wildcard-x-com", Zone: "x.com", DNSNames: []string{"*.x.com"}},
+				{Name: "wildcard-x-com", VaultName: "wildcard-x-com", Zone: "x.com", DNSNames: []string{"*.x.com"}},
 			},
 		},
 		{
@@ -74,7 +74,7 @@ func TestBuildPlanDerivesCoveringWildcards(t *testing.T) {
 			hosts: []string{"API.X.COM.", "api.x.com"},
 			zones: []string{"X.com"},
 			want: []domain.CertificateRequest{
-				{Name: "wildcard-x-com", Zone: "x.com", DNSNames: []string{"*.x.com"}},
+				{Name: "wildcard-x-com", VaultName: "wildcard-x-com", Zone: "x.com", DNSNames: []string{"*.x.com"}},
 			},
 		},
 	}
@@ -180,8 +180,8 @@ func TestBuildPlanPerWildcardGrouping(t *testing.T) {
 	}
 
 	want := []domain.CertificateRequest{
-		{Name: "wildcard-sub-x-com", Zone: "x.com", DNSNames: []string{"*.sub.x.com"}},
-		{Name: "wildcard-x-com", Zone: "x.com", DNSNames: []string{"*.x.com", "x.com"}},
+		{Name: "wildcard-sub-x-com", VaultName: "wildcard-sub-x-com", Zone: "x.com", DNSNames: []string{"*.sub.x.com"}},
+		{Name: "wildcard-x-com", VaultName: "wildcard-x-com", Zone: "x.com", DNSNames: []string{"*.x.com", "x.com"}},
 	}
 	if !reflect.DeepEqual(plan.Certificates, want) {
 		t.Errorf("certificates =\n  %+v\nwant\n  %+v", plan.Certificates, want)
@@ -234,27 +234,98 @@ func TestSplitListenerHostnames(t *testing.T) {
 // could not be wired up at all without this.
 func TestBuildPlanIssuesZoneWildcardsWithoutDiscovery(t *testing.T) {
 	t.Parallel()
+	// The apex is seeded separately because a wildcard does not cover it, and
+	// independently because tying it to IssueZoneWildcards would make setting it
+	// alone a silent no-op.
+	tests := []struct {
+		name      string
+		wildcards bool
+		apex      bool
+		want      map[string][]string
+	}{
+		{
+			name:      "wildcards only",
+			wildcards: true,
+			want: map[string][]string{
+				"wildcard-x-com":    {"*.x.com"},
+				"wildcard-xx-x-com": {"*.xx.x.com"},
+			},
+		},
+		{
+			name: "apex only",
+			apex: true,
+			// Named after the SAN it carries: "x-com" holds "x.com", and a
+			// listener configured for it is served what it expects.
+			want: map[string][]string{
+				"x-com":    {"x.com"},
+				"xx-x-com": {"xx.x.com"},
+			},
+		},
+		{
+			name:      "wildcard and apex share one certificate per zone",
+			wildcards: true,
+			apex:      true,
+			want: map[string][]string{
+				"wildcard-x-com":    {"*.x.com", "x.com"},
+				"wildcard-xx-x-com": {"*.xx.x.com", "xx.x.com"},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			plan, err := domain.BuildPlan(domain.PlanInput{
+				Zones:              []string{"x.com", "xx.x.com"},
+				MaxCertificates:    10,
+				Grouping:           domain.GroupingPerZone,
+				IssueZoneWildcards: tc.wildcards,
+				IssueZoneApex:      tc.apex,
+				Hosts:              nil, // nothing routed yet
+			})
+			if err != nil {
+				t.Fatalf("BuildPlan: %v", err)
+			}
+
+			got := map[string][]string{}
+			for _, cert := range plan.Certificates {
+				got[cert.Name] = cert.DNSNames
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("certificates = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Seeding an apex must not multiply the certificate count under PerWildcard:
+// the apex belongs on the certificate that already carries its zone wildcard.
+func TestBuildPlanSeedsTheApexOntoTheZoneWildcardUnderPerWildcard(t *testing.T) {
+	t.Parallel()
 	plan, err := domain.BuildPlan(domain.PlanInput{
-		Zones:              []string{"x.com", "xx.x.com"},
+		Zones:              []string{"x.com"},
 		MaxCertificates:    10,
-		Grouping:           domain.GroupingPerZone,
+		Grouping:           domain.GroupingPerWildcard,
 		IssueZoneWildcards: true,
-		Hosts:              nil, // nothing routed yet
+		IssueZoneApex:      true,
+		Hosts:              []string{"a.b.x.com"},
 	})
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
 
-	got := map[string][]string{}
-	for _, cert := range plan.Certificates {
-		got[cert.Name] = cert.DNSNames
+	want := []domain.CertificateRequest{
+		{
+			Name: "wildcard-b-x-com", VaultName: "wildcard-b-x-com", Zone: "x.com",
+			DNSNames: []string{"*.b.x.com"},
+		},
+		{
+			Name: "wildcard-x-com", VaultName: "wildcard-x-com", Zone: "x.com",
+			DNSNames: []string{"*.x.com", "x.com"},
+		},
 	}
-	want := map[string][]string{
-		"wildcard-x-com":    {"*.x.com"},
-		"wildcard-xx-x-com": {"*.xx.x.com"},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("certificates = %v, want %v", got, want)
+	if !reflect.DeepEqual(plan.Certificates, want) {
+		t.Errorf("certificates =\n  %+v\nwant\n  %+v", plan.Certificates, want)
 	}
 }
 
@@ -314,6 +385,171 @@ func TestBuildPlanSeedingStillHonoursTheGuards(t *testing.T) {
 	}) {
 		t.Errorf("skipped = %+v, want the overflow reported with ReasonMaxCertificates", plan.Skipped)
 	}
+
+	// A seeded apex travels the same path, so the cap has to reach it too.
+	plan, err = domain.BuildPlan(domain.PlanInput{
+		Zones:           []string{"a.com", "b.com", "c.com"},
+		MaxCertificates: 2,
+		IssueZoneApex:   true,
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if len(plan.Certificates) != 2 {
+		t.Errorf("certificates = %d, want 2 -- the cap must apply to a seeded apex", len(plan.Certificates))
+	}
+}
+
+// An adopter's Application Gateway listener already names the Key Vault object
+// it serves, and repointing it is a live cutover -- so the operator has to be
+// able to write that name rather than the one it would derive.
+func TestBuildPlanPinsTheKeyVaultObjectName(t *testing.T) {
+	t.Parallel()
+	plan, err := domain.BuildPlan(domain.PlanInput{
+		Zones:              []string{"x.com", "tm.x.com"},
+		MaxCertificates:    10,
+		IssueZoneWildcards: true,
+		IssueZoneApex:      true,
+		// Keys are normalised like any other hostname, so case and a root dot
+		// do not decide whether a pin is honoured.
+		CertificateNames: map[string]string{"x.com": "ingress-certificate", "TM.X.com.": "TM-certificate"},
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	// Only VaultName follows the pin. Name is what the controller calls the
+	// cert-manager Certificate and the sync resource, so moving it would orphan
+	// everything this policy has already issued.
+	want := []domain.CertificateRequest{
+		{
+			Name: "wildcard-tm-x-com", VaultName: "TM-certificate", Zone: "tm.x.com",
+			DNSNames: []string{"*.tm.x.com", "tm.x.com"},
+		},
+		{
+			Name: "wildcard-x-com", VaultName: "ingress-certificate", Zone: "x.com",
+			DNSNames: []string{"*.x.com", "x.com"},
+		},
+	}
+	if !reflect.DeepEqual(plan.Certificates, want) {
+		t.Errorf("certificates =\n  %+v\nwant\n  %+v", plan.Certificates, want)
+	}
+}
+
+// The pin belongs to the zone, not to a SAN, so it holds even where the zone
+// wildcard is not covered and the derived name follows a deeper one.
+func TestBuildPlanPinsTheZoneCertificateWhateverItIsNamed(t *testing.T) {
+	t.Parallel()
+	plan, err := domain.BuildPlan(domain.PlanInput{
+		Zones:            []string{"x.com"},
+		MaxCertificates:  10,
+		Hosts:            []string{"a.b.x.com"},
+		CertificateNames: map[string]string{"x.com": "ingress-certificate"},
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	want := []domain.CertificateRequest{
+		{
+			Name: "wildcard-b-x-com", VaultName: "ingress-certificate", Zone: "x.com",
+			DNSNames: []string{"*.b.x.com"},
+		},
+	}
+	if !reflect.DeepEqual(plan.Certificates, want) {
+		t.Errorf("certificates =\n  %+v\nwant\n  %+v", plan.Certificates, want)
+	}
+}
+
+// A pin for a zone the cluster does not route yet names nothing, which is not
+// the dangerous case: no certificate has been written under the wrong name.
+func TestBuildPlanAcceptsAPinForAZoneWithNothingPlanned(t *testing.T) {
+	t.Parallel()
+	plan, err := domain.BuildPlan(domain.PlanInput{
+		Zones:            []string{"x.com"},
+		MaxCertificates:  10,
+		CertificateNames: map[string]string{"x.com": "ingress-certificate"},
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if len(plan.Certificates) != 0 {
+		t.Errorf("certificates = %+v, want none", plan.Certificates)
+	}
+}
+
+func TestBuildPlanRejectsAnUnusablePin(t *testing.T) {
+	t.Parallel()
+	// Every one of these is silent if it is not refused: a Key Vault object
+	// written under a name no listener reads, or two certificates overwriting
+	// each other in one object -- under a policy reporting Ready either way.
+	tests := []struct {
+		name string
+		in   domain.PlanInput
+		want error
+	}{
+		{
+			name: "pinned zone is not in the allowlist",
+			in: domain.PlanInput{
+				Zones: []string{"x.com"}, IssueZoneWildcards: true,
+				CertificateNames: map[string]string{"y.com": "ingress-certificate"},
+			},
+			want: domain.ErrInvalidZone,
+		},
+		{
+			name: "one zone pinned twice",
+			in: domain.PlanInput{
+				Zones: []string{"x.com"}, IssueZoneWildcards: true,
+				CertificateNames: map[string]string{"x.com": "ingress-certificate", "X.com.": "other-certificate"},
+			},
+			want: domain.ErrInvalidZone,
+		},
+		{
+			name: "a name Azure would reject",
+			in: domain.PlanInput{
+				Zones: []string{"x.com"}, IssueZoneWildcards: true,
+				CertificateNames: map[string]string{"x.com": "ingress_certificate"},
+			},
+			want: domain.ErrInvalidVaultName,
+		},
+		{
+			name: "two zones pinned to one object",
+			in: domain.PlanInput{
+				Zones: []string{"x.com", "y.com"}, IssueZoneWildcards: true,
+				CertificateNames: map[string]string{"x.com": "ingress-certificate", "y.com": "ingress-certificate"},
+			},
+			want: domain.ErrInvalidVaultName,
+		},
+		{
+			name: "a pin colliding with another zone's derived name",
+			in: domain.PlanInput{
+				Zones: []string{"x.com", "y.com"}, IssueZoneWildcards: true,
+				CertificateNames: map[string]string{"y.com": "wildcard-x-com"},
+			},
+			want: domain.ErrInvalidVaultName,
+		},
+		{
+			// Refused rather than guessed: the CRD only accepts pins under
+			// PerZone, and picking one of the two here would silently leave the
+			// other's certificate on a name nothing serves.
+			name: "ambiguous under PerWildcard",
+			in: domain.PlanInput{
+				Zones: []string{"x.com"}, Grouping: domain.GroupingPerWildcard,
+				Hosts:            []string{"a.b.x.com", "a.c.x.com"},
+				CertificateNames: map[string]string{"x.com": "ingress-certificate"},
+			},
+			want: domain.ErrInvalidVaultName,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := domain.BuildPlan(tc.in); !errors.Is(err, tc.want) {
+				t.Errorf("BuildPlan() = %v, want %v", err, tc.want)
+			}
+		})
+	}
 }
 
 func TestBuildPlanNamesAZoneCertificateAfterWhatItCovers(t *testing.T) {
@@ -331,21 +567,21 @@ func TestBuildPlanNamesAZoneCertificateAfterWhatItCovers(t *testing.T) {
 			name:  "no zone wildcard is covered",
 			hosts: []string{"a.b.x.com"},
 			want: domain.CertificateRequest{
-				Name: "wildcard-b-x-com", Zone: "x.com", DNSNames: []string{"*.b.x.com"},
+				Name: "wildcard-b-x-com", VaultName: "wildcard-b-x-com", Zone: "x.com", DNSNames: []string{"*.b.x.com"},
 			},
 		},
 		{
 			name:  "only the apex is covered",
 			hosts: []string{"x.com"},
 			want: domain.CertificateRequest{
-				Name: "x-com", Zone: "x.com", DNSNames: []string{"x.com"},
+				Name: "x-com", VaultName: "x-com", Zone: "x.com", DNSNames: []string{"x.com"},
 			},
 		},
 		{
 			name:  "the zone wildcard wins when it is covered",
 			hosts: []string{"a.x.com", "a.b.x.com", "x.com"},
 			want: domain.CertificateRequest{
-				Name: "wildcard-x-com", Zone: "x.com",
+				Name: "wildcard-x-com", VaultName: "wildcard-x-com", Zone: "x.com",
 				DNSNames: []string{"*.b.x.com", "*.x.com", "x.com"},
 			},
 		},

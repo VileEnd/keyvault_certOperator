@@ -21,6 +21,11 @@ type PolicySpec struct {
 	Grouping domain.Grouping
 	// IssueZoneWildcards plans "*.zone" for every zone regardless of discovery.
 	IssueZoneWildcards bool
+	// IssueZoneApex plans the bare zone for every zone regardless of discovery.
+	IssueZoneApex bool
+	// CertificateNames pins the Key Vault object name for a zone, keyed by zone,
+	// for a gateway whose listeners already name the object they serve.
+	CertificateNames map[string]string
 	// VaultURL is the Key Vault the resulting certificates are synced to.
 	VaultURL string
 }
@@ -80,6 +85,8 @@ func (p *Planner) Plan(ctx context.Context, spec PolicySpec) (DesiredState, erro
 		Existing:           spec.Existing,
 		Grouping:           spec.Grouping,
 		IssueZoneWildcards: spec.IssueZoneWildcards,
+		IssueZoneApex:      spec.IssueZoneApex,
+		CertificateNames:   spec.CertificateNames,
 	})
 	if err != nil {
 		return DesiredState{}, err
@@ -91,7 +98,10 @@ func (p *Planner) Plan(ctx context.Context, spec PolicySpec) (DesiredState, erro
 		Certificates:    make([]DesiredCertificate, 0, len(plan.Certificates)),
 	}
 	for _, cert := range plan.Certificates {
-		ref := VaultRef{VaultURL: spec.VaultURL, CertificateName: cert.Name}
+		// VaultName, not Name: the listener has to be pointed at the object the
+		// certificate is actually imported into, which spec.certificateNames may
+		// have pinned to a name the gateway already serves.
+		ref := VaultRef{VaultURL: spec.VaultURL, CertificateName: cert.VaultName}
 		state.Certificates = append(state.Certificates, DesiredCertificate{
 			CertificateRequest: cert,
 			SecretName:         cert.Name + "-tls",
