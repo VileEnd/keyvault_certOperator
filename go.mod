@@ -1,6 +1,6 @@
 module github.com/VileEnd/keyvault_certOperator
 
-go 1.26.0
+go 1.27.0
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.1
@@ -13,7 +13,7 @@ require (
 	k8s.io/apimachinery v0.37.2
 	k8s.io/client-go v0.37.2
 	sigs.k8s.io/controller-runtime v0.25.2
-	sigs.k8s.io/gateway-api v1.6.2
+	sigs.k8s.io/gateway-api v1.7.0
 	sigs.k8s.io/yaml v1.6.0
 	software.sslmate.com/src/go-pkcs12 v0.7.4
 )
@@ -90,7 +90,7 @@ require (
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/term v0.47.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
-	golang.org/x/time v0.15.0 // indirect
+	golang.org/x/time v0.16.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.5.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260817212433-ac3dfec99bb1 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260817212433-ac3dfec99bb1 // indirect
