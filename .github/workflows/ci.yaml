@@ -1,13 +1,17 @@
 name: CI
 
 on:
+  # Every change reaches main through a pull request, which already ran this
+  # whole suite against the merge result, so running it again on each merge
+  # commit only repeated it. It still runs on main when the inputs to the
+  # caches change: a cache written by a pull request is private to that pull
+  # request, so without a run on main every later one would rebuild the tools.
   push:
     branches: ["main"]
-    paths-ignore: ["**.md", "docs/**", "LICENSE"]
-  # Deliberately no paths-ignore here. Required status checks gate pull
+    paths: ["go.sum", "Makefile", "Dockerfile", ".github/**"]
+  # Deliberately no path filter here. Required status checks gate pull
   # requests, and a PR that produces no check runs at all can never satisfy
-  # them -- so a docs-only PR would block permanently the moment branch
-  # protection is switched on. The saving is kept on push, where nothing gates.
+  # them -- so a docs-only PR would block permanently.
   pull_request:
   workflow_dispatch:
   # A vulnerability is disclosed against code that has not changed, so nothing
@@ -54,25 +58,17 @@ jobs:
       - uses: ./.github/actions/go-tools
         with:
           go-version: ${{ env.GO_VERSION }}
-      # make test runs go vet as a prerequisite. These two add what it does not
-      # cover, and run here rather than in a job of their own because the
-      # dependency graph is already compiled by this point.
+      # make test runs go vet as a prerequisite, which also compiles everything.
       - name: Test
         run: make test
-      - run: go build ./...
       # The end-to-end suite is behind a build tag, so vet it explicitly.
       - run: go vet -tags e2e ./test/...
-      - name: Upload coverage
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: coverage
-          path: cover.out
-          if-no-files-found: warn
 
-  generated:
-    name: Generated files are current
+  static:
+    name: Generated files, chart and Terraform
     runs-on: ubuntu-latest
+    # Three checks that each take seconds. As separate jobs most of their time
+    # went on checking out and restoring the same caches three times over.
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/go-tools
@@ -82,15 +78,6 @@ jobs:
       # the chart's copy of the CRDs is stale.
       - run: make check-manifests
       - run: make check-helm-manifests
-
-  chart:
-    name: Helm chart
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/go-tools
-        with:
-          go-version: ${{ env.GO_VERSION }}
       - name: Lint and render
         run: |
           make helm
@@ -112,6 +99,15 @@ jobs:
             echo "the chart rendered without azure.clientId; the guard is broken"
             exit 1
           fi
+      # Terraform is not on the runner image, so it is installed from the
+      # version the Makefile pins, checksum-verified, into the cached ./bin.
+      - name: Terraform format
+        run: make tf-fmt
+      # init needs the provider registry, which a restrictive network blocks.
+      # This is therefore the only place the module's argument names are
+      # checked against the real provider schema.
+      - name: Terraform validate
+        run: make tf-validate
 
   vulncheck:
     name: Known vulnerabilities
@@ -127,27 +123,8 @@ jobs:
       - name: Run govulncheck
         run: make vulncheck
 
-  terraform:
-    name: Terraform
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      # Terraform is not on the runner image, so it is installed from the
-      # version the Makefile pins, checksum-verified, into the cached ./bin --
-      # the same path every other tool in this repo takes.
-      - uses: ./.github/actions/go-tools
-        with:
-          go-version: ${{ env.GO_VERSION }}
-      - name: Format
-        run: make tf-fmt
-      # init needs the provider registry, which a restrictive network blocks.
-      # This job is therefore the only place the module's argument names are
-      # checked against the real provider schema.
-      - name: Validate
-        run: make tf-validate
-
-  e2e:
-    name: End-to-end (k3s)
+  e2e-fullstack:
+    name: End-to-end (k3s, cert-manager issuing)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -175,56 +152,7 @@ jobs:
       # Root is required: the fake Key Vault binds port 443 under a real
       # *.vault.azure.net name, so the SDK's challenge-resource verification is
       # exercised rather than switched off. It also writes /etc/hosts.
-      - name: Run the end-to-end suite
-        shell: bash
-        run: |
-          sudo -E env "PATH=$PATH" "HOME=$HOME" "GOPATH=$(go env GOPATH)" \
-            "GOMODCACHE=$(go env GOMODCACHE)" "GOCACHE=$(go env GOCACHE)" \
-            KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
-            test/e2e/run.sh 2>&1 | tee e2e.log
-      # Asserted by name rather than by "no skips": a skip would otherwise look
-      # exactly like a pass and quietly remove the only coverage of RBAC
-      # sufficiency and the Azure wire protocol. The cert-manager test is
-      # expected to skip here; it has its own job.
-      - name: Assert the suite ran
-        run: |
-          grep -q -- "--- PASS: TestOperatorSyncsACertificateIntoKeyVault" e2e.log
-          grep -q -- "--- PASS: TestOperatorDiscoversHostsAndRequestsCertificates" e2e.log
-          grep -q -- "--- PASS: TestOperatorDiscoversHostsFromGatewayListeners" e2e.log
-      - name: Dump diagnostics on failure
-        if: failure()
-        env:
-          KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-        run: |
-          kubectl get keyvaultcertificatesyncs -A -o yaml || true
-          kubectl get wildcardcertificatepolicies -A -o yaml || true
-          sudo journalctl -u k3s --no-pager -n 100 || true
-
-  e2e-fullstack:
-    name: End-to-end with cert-manager issuing
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/go-tools
-        with:
-          go-version: ${{ env.GO_VERSION }}
-      - name: Start k3s
-        run: |
-          curl -sfL https://get.k3s.io \
-            | sudo INSTALL_K3S_VERSION="$(make -s print-k3s-version)" sh -s - \
-            --disable traefik --disable metrics-server --disable local-storage \
-            --disable servicelb --write-kubeconfig-mode 644
-      - name: Wait for the node to be ready
-        env:
-          KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-        run: |
-          for _ in $(seq 1 60); do
-            if kubectl get nodes 2>/dev/null | grep -q ' Ready '; then break; fi
-            sleep 5
-          done
-          kubectl get nodes
-      - name: Prime the build
-        run: go build ./cmd/manager
+      #
       # The whole pipeline: the policy plans a wildcard, the operator asks
       # cert-manager for it, cert-manager genuinely issues it, and the operator
       # imports the result into the mock Key Vault. Nothing hand-writes the
@@ -243,6 +171,12 @@ jobs:
             exit 1
           fi
           grep -q -- "--- PASS: TestCertManagerIssuesAndTheOperatorSyncsItToKeyVault" e2e-fullstack.log
+          # Asserted by name rather than by "no skips": a skip would otherwise
+          # look exactly like a pass and quietly remove the only coverage of
+          # RBAC sufficiency and the Azure wire protocol.
+          grep -q -- "--- PASS: TestOperatorSyncsACertificateIntoKeyVault" e2e-fullstack.log
+          grep -q -- "--- PASS: TestOperatorDiscoversHostsAndRequestsCertificates" e2e-fullstack.log
+          grep -q -- "--- PASS: TestOperatorDiscoversHostsFromGatewayListeners" e2e-fullstack.log
       - name: Dump diagnostics on failure
         if: failure()
         env:
@@ -269,9 +203,10 @@ jobs:
         uses: actions/cache@v6
         with:
           path: /tmp/.buildx-cache
-          key: buildx-${{ runner.os }}-${{ hashFiles('go.sum', 'Dockerfile') }}-${{ github.sha }}
+          # Keyed on what the cached layers depend on. A per-commit key stored
+          # a fresh copy of the same layers on every run.
+          key: buildx-${{ runner.os }}-${{ hashFiles('go.sum', 'Dockerfile') }}
           restore-keys: |
-            buildx-${{ runner.os }}-${{ hashFiles('go.sum', 'Dockerfile') }}-
             buildx-${{ runner.os }}-
       - name: Build the image
         run: |
