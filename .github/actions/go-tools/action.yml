@@ -26,6 +26,10 @@ runs:
     - uses: actions/setup-go@v5
       with:
         go-version: ${{ inputs.go-version }}
+        # Without this the runner's pre-installed patch release is used, which
+        # trails a security release by days. govulncheck then fails on a
+        # standard-library fix that is already out.
+        check-latest: true
         cache: true
 
     # Keyed on the Makefile because that is where every tool version is pinned,
