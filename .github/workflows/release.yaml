@@ -193,6 +193,10 @@ jobs:
       # one cluster, but the end-to-end suite proves only the wire protocol
       # against a faithful fake, not Azure's acceptance of the PKCS#12 archive.
       # The tag promises a reproducible artifact, not a validated one.
+      #
+      # --generate-notes appends the pull requests merged since the previous
+      # tag. v0.1.2 went out with the install text only, so there was nothing
+      # to say what had changed or whether upgrading was safe.
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -225,5 +229,6 @@ jobs:
           gh release create "${{ steps.version.outputs.tag }}" \
             --title "${{ steps.version.outputs.tag }}" \
             --notes-file /tmp/notes.md \
+            --generate-notes \
             --prerelease \
             dist/install.yaml
