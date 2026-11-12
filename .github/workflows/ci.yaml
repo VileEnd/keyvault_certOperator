@@ -10,6 +10,11 @@ on:
   # protection is switched on. The saving is kept on push, where nothing gates.
   pull_request:
   workflow_dispatch:
+  # A vulnerability is disclosed against code that has not changed, so nothing
+  # above ever fires for it. Without this the first sign was a Dependabot pull
+  # request failing, months after main had last been checked.
+  schedule:
+    - cron: "17 5 * * 1"
 
 permissions:
   contents: read
@@ -98,6 +103,7 @@ jobs:
             --set metrics.enabled=true \
             --set metrics.service.create=true \
             --set metrics.serviceMonitor.enabled=true \
+            --set metrics.prometheusRule.enabled=true \
             --set watchNamespaces="{cert-system}" > /dev/null
       - name: Refuse to render without an identity
         run: |

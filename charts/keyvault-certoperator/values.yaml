@@ -76,6 +76,20 @@ metrics:
     enabled: false
     interval: 30s
     labels: {}
+  # Alert rules for the Prometheus Operator. They need the metrics to be
+  # scraped, so enable the Service and ServiceMonitor above as well (or scrape
+  # the endpoint some other way).
+  prometheusRule:
+    enabled: false
+    labels: {}
+    # Warn and page this long before a synced certificate expires. A renewal
+    # normally lands a month ahead, so reaching either means it is not arriving.
+    expiryWarningDays: 14
+    expiryCriticalDays: 3
+    # Fire when a resource has not synced successfully for this many seconds.
+    # Keep it comfortably above the largest syncPolicy.resyncInterval in use
+    # (default 1h).
+    staleAfterSeconds: 10800
 
 resources:
   limits:

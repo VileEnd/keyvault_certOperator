@@ -36,7 +36,7 @@ runs:
     # so a version bump invalidates the cache by construction rather than by
     # someone remembering to bump a key. envtest's Kubernetes binaries live in
     # bin/k8s and are covered by the same entry.
-    - uses: actions/cache@v4
+    - uses: actions/cache@v6
       with:
         path: bin
         key: tools-${{ github.job }}-${{ runner.os }}-go${{ inputs.go-version }}-${{ hashFiles('Makefile') }}
@@ -44,7 +44,7 @@ runs:
           tools-${{ github.job }}-${{ runner.os }}-go${{ inputs.go-version }}-
 
     - if: inputs.lint-cache == 'true'
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: ~/.cache/golangci-lint
         key: golangci-${{ runner.os }}-${{ hashFiles('.golangci.yml', 'go.sum') }}

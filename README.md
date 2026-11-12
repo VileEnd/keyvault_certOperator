@@ -249,8 +249,9 @@ Two operational notes:
 
 - Gateway API CRDs must be installed **before the operator starts** —
   controller-runtime cannot open an informer for a type the API server does not
-  serve. Installing Gateway API afterwards needs a restart. The startup log says
-  which sources are active.
+  serve. If Gateway API is installed afterwards, the operator notices within a
+  minute and restarts itself to pick it up. The startup log says which sources
+  are active.
 - `orphanPolicy: Prune` is guarded, but know what the guard does. Pruning is
   judged against the current discovery pass, so it is withheld when that pass
   cannot be trusted: when it planned **no certificates at all** — which is
@@ -279,6 +280,30 @@ manage certificates yourself.
 > cache only watches labelled Secrets, so an unlabelled one is invisible to it by
 > design. Generated certificates get the label automatically via cert-manager's
 > `secretTemplate`.
+
+## Monitoring
+
+Metrics are off by default. `metrics.enabled=true` serves them over HTTPS on
+`:8443`, gated by TokenReview and SubjectAccessReview; add
+`metrics.service.create=true` and `metrics.serviceMonitor.enabled=true` for the
+Prometheus Operator to scrape them.
+
+| Metric | Meaning |
+| --- | --- |
+| `certsync_certificate_not_after_timestamp_seconds` | Expiry of each synced certificate. |
+| `certsync_last_success_timestamp_seconds` | When each resource last synced successfully. |
+| `certsync_sync_total{result}` | Syncs by outcome: `Import`, `None` or `error`. |
+| `certsync_certificates_required` | Certificates a policy currently requires. |
+| `certsync_hosts_skipped` | Discovered hostnames a policy is not covering. |
+
+`metrics.prometheusRule.enabled=true` installs alerts for a certificate nearing
+expiry (14 days warning, 3 days critical), a resource that has stopped syncing,
+syncs that keep failing, and the operator not being scraped. The thresholds are
+chart values.
+
+The endpoint is plain Prometheus exposition format, so an OpenTelemetry
+Collector scrapes it with its `prometheus` receiver; nothing in the operator
+needs to change for that.
 
 ## Design decisions worth knowing
 

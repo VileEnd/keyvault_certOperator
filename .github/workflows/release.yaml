@@ -142,6 +142,7 @@ jobs:
             || docker buildx use release
           docker buildx build --push \
             --platform linux/amd64,linux/arm64 \
+            --provenance=mode=max --sbom=true \
             -t "${{ steps.registry.outputs.image }}:${{ steps.version.outputs.tag }}" \
             -t "${{ steps.registry.outputs.image }}:latest" \
             --cache-from type=local,src=/tmp/.buildx-cache \

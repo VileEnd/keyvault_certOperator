@@ -29,8 +29,12 @@ updates:
           - minor
           - patch
 
+  # The composite action is listed by name: "/" covers .github/workflows only,
+  # which is how its actions fell two major versions behind the workflows'.
   - package-ecosystem: github-actions
-    directory: /
+    directories:
+      - /
+      - /.github/actions/go-tools
     schedule:
       interval: weekly
     groups:
