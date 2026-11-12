@@ -98,6 +98,51 @@ func TestSnapshotReadsThumbprintAndChainDigest(t *testing.T) {
 	}
 }
 
+func TestSnapshotReportsWhichSecretACertificateWasSyncedFrom(t *testing.T) {
+	t.Parallel()
+	str := func(s string) *string { return &s }
+	ours := map[string]*string{
+		app.TagManagedBy:       str(app.TagManagedByValue),
+		app.TagSourceNamespace: str("certs"),
+		app.TagSourceSecret:    str("wildcard-x-com-tls"),
+	}
+	tests := []struct {
+		name string
+		tags map[string]*string
+		want string
+	}{
+		{"imported by this operator", ours, "certs/wildcard-x-com-tls"},
+		// Uploaded by hand: nothing to say whose it is.
+		{"untagged", nil, ""},
+		// Someone else's convention using the same tag names is not ours.
+		{"foreign managed-by", map[string]*string{
+			app.TagManagedBy: str("terraform"), app.TagSourceNamespace: str("certs"), app.TagSourceSecret: str("x"),
+		}, ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			server := &fake.Server{
+				GetCertificate: func(_ testContext, _, _ string, _ *azcertificates.GetCertificateOptions) (
+					resp azfake.Responder[azcertificates.GetCertificateResponse], errResp azfake.ErrorResponder) {
+					resp.SetResponse(http.StatusOK, azcertificates.GetCertificateResponse{
+						Certificate: azcertificates.Certificate{Tags: tc.tags},
+					}, nil)
+					return
+				},
+			}
+			snapshot, err := newRepository(t, server).Snapshot(t.Context(), testRef())
+			if err != nil {
+				t.Fatalf("Snapshot: %v", err)
+			}
+			if snapshot.ManagedSource != tc.want {
+				t.Errorf("ManagedSource = %q, want %q", snapshot.ManagedSource, tc.want)
+			}
+		})
+	}
+}
+
 func TestImportSendsBase64PayloadContentTypeAndTags(t *testing.T) {
 	t.Parallel()
 	var got azcertificates.ImportCertificateParameters

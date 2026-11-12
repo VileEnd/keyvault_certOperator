@@ -46,6 +46,18 @@ azure:
   #   allowedVaults: ["my-vault"]
   allowedVaults: []
 
+  # Which existing Key Vault certificates a sync may import over.
+  #
+  # The certificate name is chosen by whoever writes the resource, and a
+  # listener serves whatever is stored under the name it was given.
+  #
+  #   adopt-untagged  Refuse a certificate this operator synced from a different
+  #                   Secret; still take over one it never touched (default).
+  #   strict          Also refuse certificates it never touched. Use this once
+  #                   every certificate in the vault is operator-managed.
+  #   off             No check.
+  vaultOwnership: adopt-untagged
+
   # The Azure cloud this operator's identity lives in. It resolves every bare
   # Key Vault name -- in allowedVaults above and in any resource that does not
   # name a cloud of its own -- so a sovereign-cloud deployment sets it once here

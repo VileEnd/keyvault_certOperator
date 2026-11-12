@@ -44,6 +44,11 @@ type VaultSnapshot struct {
 	ChainDigest string
 	Enabled     bool
 	NotAfter    time.Time
+	// ManagedSource is the "namespace/name" of the Secret this operator last
+	// imported the certificate from, read back from the tags stamped on import.
+	// Empty means the certificate carries no such tags: it was uploaded by
+	// something else.
+	ManagedSource string
 }
 
 // Decision is the outcome of comparing desired state against Key Vault.

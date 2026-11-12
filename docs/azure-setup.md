@@ -164,6 +164,19 @@ azure:
 A resource naming any other vault then fails immediately with
 `Ready=False, Reason=ConfigInvalid`, and nothing is issued for it.
 
+The allowlist bounds *which vault*. Which certificate inside it is bounded
+separately: the name is also chosen by whoever writes the resource, and a
+listener serves whatever is stored under the name it was given. So a sync will
+not import over a certificate that was synced from a different Secret. One the
+operator never touched -- uploaded by hand -- is still adopted, which is how an
+existing certificate is taken over. Once every certificate in the vault is
+operator-managed, close that too:
+
+```yaml
+azure:
+  vaultOwnership: strict
+```
+
 The Terraform module wires this for you — `helm_values` carries the same vault
 the role assignment was scoped to, so the Azure grant and the Kubernetes bound
 come from one source and cannot disagree. Names and full URLs are equivalent,
@@ -315,6 +328,15 @@ and cert-manager has no knowledge of this operator.
 The vault is outside `azure.allowedVaults`. Either the resource names the wrong
 vault, or the allowlist is missing one the identity legitimately holds a role
 on. The condition message names both the vault requested and the permitted set.
+
+### A resource reports VaultCertificateNotOwned
+
+The Key Vault certificate it names is already synced from a different Secret
+(the message says which), or -- under `vaultOwnership: strict` -- was not
+created by this operator at all. Nothing was written. Give the resource a
+`certificateName` of its own. If the certificate really is moving to a new
+Secret or namespace, delete the sync resource that owns it and then the
+certificate in Key Vault, and the new one imports on its next pass.
 
 ### Synced is True but Ready is False, reason DisabledInVault
 

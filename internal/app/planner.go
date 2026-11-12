@@ -17,6 +17,10 @@ type PolicySpec struct {
 	// Existing names the certificates the policy has already generated, so the
 	// cap can overflow a new certificate rather than evict an issued one.
 	Existing []string
+	// ExistingDNSNames are the names already on the generated certificates, so
+	// the per-certificate name cap can turn away a new name rather than drop
+	// one that is being served.
+	ExistingDNSNames []string
 	// Grouping selects how SANs are packed into certificates.
 	Grouping domain.Grouping
 	// IssueZoneWildcards plans "*.zone" for every zone regardless of discovery.
@@ -78,6 +82,7 @@ func (p *Planner) Plan(ctx context.Context, spec PolicySpec) (DesiredState, erro
 		Zones:              spec.Zones,
 		MaxCertificates:    spec.MaxCertificates,
 		Existing:           spec.Existing,
+		ExistingDNSNames:   spec.ExistingDNSNames,
 		Grouping:           spec.Grouping,
 		IssueZoneWildcards: spec.IssueZoneWildcards,
 	})

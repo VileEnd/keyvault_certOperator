@@ -114,6 +114,26 @@ func TestSyncDoesNotReimportAnUnchangedCertificate(t *testing.T) {
 	}
 }
 
+func TestSyncRefusesToReplaceAnotherSyncsCertificate(t *testing.T) {
+	t.Parallel()
+	// The certificate name is free text on the resource. Without this, naming
+	// the certificate a listener already serves replaces it.
+	bundle := newBundle(t, "*.x.com", "x.com")
+	vault := &fakeVault{snapshot: domain.VaultSnapshot{
+		Exists: true, Enabled: true, Thumbprint: []byte("someone else's leaf"),
+		ManagedSource: "team-b/their-tls",
+	}}
+	encoder := &fakeEncoder{}
+
+	_, err := newSyncer(&fakeSource{bundle: bundle}, vault, encoder).Sync(t.Context(), request())
+	if !errors.Is(err, domain.ErrVaultCertificateNotOwned) {
+		t.Fatalf("Sync error = %v, want ErrVaultCertificateNotOwned", err)
+	}
+	if len(vault.imports) != 0 || encoder.calls != 0 {
+		t.Errorf("imports = %d, encodes = %d; want neither", len(vault.imports), encoder.calls)
+	}
+}
+
 func TestSyncImportsWhenAbsent(t *testing.T) {
 	t.Parallel()
 	bundle := newBundle(t, "*.x.com", "x.com")

@@ -206,6 +206,7 @@ for a commented example.
 |---|---|---|
 | `zones` | — | **Required allowlist.** Nothing outside these zones is ever issued. |
 | `maxCertificates` | `10` | Overflow is reported in status, not issued. |
+| *(fixed)* | `100` | Names per zone. Let's Encrypt refuses more on one certificate; the overflow is reported in `status.skippedHosts`, and names already issued keep their place. |
 | `discovery.ingress` | `true` | Discover from `networking.k8s.io` Ingresses. |
 | `discovery.httpRoutes` | `true` | Only watched if Gateway API CRDs exist at operator start. |
 | `discovery.gateways` | `true` | Gateway listener hostnames. Same startup constraint. See below. |

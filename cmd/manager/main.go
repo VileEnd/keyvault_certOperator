@@ -60,6 +60,7 @@ type options struct {
 	watchNamespaces string
 	credentialMode  string
 	allowedVaults   string
+	vaultOwnership  string
 	azureCloud      string
 }
 
@@ -90,6 +91,10 @@ func run() error {
 			"Empty permits any vault the identity has rights on. Set this to the same "+
 			"vault the identity was granted, so a resource naming another vault fails "+
 			"fast as a configuration error instead of backing off against a 403.")
+	flag.StringVar(&opts.vaultOwnership, "vault-ownership", string(domain.OwnershipAdoptUntagged),
+		"Which existing Key Vault certificates a sync may import over. adopt-untagged (default) "+
+			"refuses one this operator synced from a different Secret but takes over one it never "+
+			"touched; strict also refuses those; off checks nothing.")
 	flag.StringVar(&opts.azureCloud, "azure-cloud", string(azure.CloudPublic),
 		"The Azure cloud this operator's identity lives in: "+strings.Join(azure.KnownClouds(), ", ")+". "+
 			"It resolves every bare Key Vault name -- in --allowed-vaults and in any resource that "+
@@ -133,6 +138,11 @@ func run() error {
 		setup.Info("no --allowed-vaults set; any vault the identity has rights on may be written to")
 	}
 
+	ownership, err := domain.ParseOwnershipMode(opts.vaultOwnership)
+	if err != nil {
+		return fmt.Errorf("parsing --vault-ownership: %w", err)
+	}
+
 	if err := (&controller.KeyVaultCertificateSyncReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
@@ -143,6 +153,7 @@ func run() error {
 
 		Cloud:         cloud,
 		AllowedVaults: allowedVaults,
+		Ownership:     ownership,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setting up the certificate sync controller: %w", err)
 	}
