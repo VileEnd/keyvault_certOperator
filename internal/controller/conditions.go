@@ -30,6 +30,9 @@ const (
 	ReasonIssuanceFailed     = "IssuanceFailed"
 	ReasonCertManagerMissing = "CertManagerMissing"
 	ReasonCertManagerFound   = "CertManagerFound"
+	// ReasonNotOwned means the Key Vault certificate the resource names belongs
+	// to another sync resource, or to nothing this operator created.
+	ReasonNotOwned = "VaultCertificateNotOwned"
 	// ReasonPruneWithheld means orphaned resources were found but deliberately
 	// not deleted, because the discovery pass they were judged against could
 	// not be trusted to be complete.
@@ -109,6 +112,8 @@ func classify(err error) (reason string, retryable bool) {
 		// and the 403 it would otherwise produce looks retryable.
 		errors.Is(err, domain.ErrVaultNotAllowed):
 		return ReasonConfigInvalid, false
+	case errors.Is(err, domain.ErrVaultCertificateNotOwned):
+		return ReasonNotOwned, false
 	case errors.Is(err, domain.ErrVaultConflict):
 		// Someone has to recover or purge the certificate in Azure; this
 		// operator holds neither permission. Backing off against it would only

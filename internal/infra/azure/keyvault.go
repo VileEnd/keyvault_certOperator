@@ -77,6 +77,7 @@ func (r *Repository) Snapshot(ctx context.Context, ref app.VaultRef) (domain.Vau
 	if value, ok := resp.Tags[app.TagChainDigest]; ok && value != nil {
 		snapshot.ChainDigest = *value
 	}
+	snapshot.ManagedSource = managedSource(resp.Tags)
 	if attrs := resp.Attributes; attrs != nil {
 		if attrs.Enabled != nil {
 			snapshot.Enabled = *attrs.Enabled
@@ -150,6 +151,22 @@ func (r *Repository) clientFor(vaultURL string) (*azcertificates.Client, error) 
 func isNotFound(err error) bool {
 	var respErr *azcore.ResponseError
 	return errors.As(err, &respErr) && respErr.StatusCode == http.StatusNotFound
+}
+
+// managedSource recovers which Secret this operator imported a certificate
+// from, or "" when the tags that record it are missing or incomplete.
+func managedSource(tags map[string]*string) string {
+	get := func(key string) string {
+		if value := tags[key]; value != nil {
+			return *value
+		}
+		return ""
+	}
+	namespace, name := get(app.TagSourceNamespace), get(app.TagSourceSecret)
+	if get(app.TagManagedBy) != app.TagManagedByValue || namespace == "" || name == "" {
+		return ""
+	}
+	return app.SecretRef{Namespace: namespace, Name: name}.String()
 }
 
 // isConflict picks out the 409 Key Vault returns when the name cannot be written

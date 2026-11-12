@@ -50,6 +50,7 @@ func TestClassify(t *testing.T) {
 		{"invalid zone", domain.ErrInvalidZone, ReasonConfigInvalid, false},
 		{"invalid host", domain.ErrInvalidHost, ReasonConfigInvalid, false},
 		// A soft-deleted certificate holding the name: only a person can clear it.
+		{"not owned", fmt.Errorf("x: %w", domain.ErrVaultCertificateNotOwned), ReasonNotOwned, false},
 		{"vault conflict", fmt.Errorf("x: %w", domain.ErrVaultConflict), ReasonVaultConflict, false},
 		{
 			// Key Vault throttling, an API server hiccup, a network blip.

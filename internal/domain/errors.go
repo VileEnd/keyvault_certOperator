@@ -40,4 +40,8 @@ var (
 	// usual cause is a soft-deleted certificate holding the name: a read reports
 	// it as absent, so the import is attempted, and refused, on every pass.
 	ErrVaultConflict = errors.New("key vault refused the import because the certificate name is in conflict")
+	// ErrVaultCertificateNotOwned means the Key Vault certificate a sync wants to
+	// write belongs to something else. It is terminal: retrying cannot change
+	// who owns a name.
+	ErrVaultCertificateNotOwned = errors.New("the key vault certificate belongs to something else")
 )

@@ -68,6 +68,10 @@ type KeyVaultCertificateSyncReconciler struct {
 	// permits every vault, which is the behaviour that existed before the flag
 	// and stays the default so an upgrade changes nothing on its own.
 	AllowedVaults domain.VaultAllowlist
+
+	// Ownership decides which existing Key Vault certificates a sync may import
+	// over. The zero value is the default, domain.OwnershipAdoptUntagged.
+	Ownership domain.OwnershipMode
 }
 
 // +kubebuilder:rbac:groups=certsync.vileend.io,resources=keyvaultcertificatesyncs,verbs=get;list;watch;create;update;patch;delete
@@ -147,7 +151,7 @@ func (r *KeyVaultCertificateSyncReconciler) sync(
 		return app.SyncOutcome{}, fmt.Errorf("%w: %w", domain.ErrInvalidPKCS12Profile, err)
 	}
 
-	syncer := &app.Syncer{Source: r.Source, Vault: r.Vault, Encode: encoder, Clock: r.Clock}
+	syncer := &app.Syncer{Source: r.Source, Vault: r.Vault, Encode: encoder, Clock: r.Clock, Ownership: r.Ownership}
 	return syncer.Sync(ctx, app.SyncRequest{
 		// Cross-namespace references are not offered, so the Secret is always in
 		// the resource's own namespace.

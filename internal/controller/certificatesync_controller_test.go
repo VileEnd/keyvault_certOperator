@@ -465,3 +465,64 @@ func TestSyncControllerSyncsACertificateWithNoWildcardAtAll(t *testing.T) {
 		t.Errorf("imports = %d, want 1", count)
 	}
 }
+
+// The certificate name is free text on the resource, and a listener serves
+// whatever is stored under the name it was given. A second sync naming a
+// certificate that is already synced from somewhere else must not replace it.
+func TestSyncControllerRefusesToReplaceAnotherSyncsCertificate(t *testing.T) {
+	requireEnvtest(t)
+	ctx := t.Context()
+	const certName = "wildcard-shared-com"
+
+	root := testutil.NewRootCA(t, "test root")
+	create := func(namespace string) *v1alpha1.KeyVaultCertificateSync {
+		t.Helper()
+		if err := k8sClient.Create(ctx, newNamespace(namespace)); err != nil {
+			t.Fatalf("creating namespace: %v", err)
+		}
+		leaf := root.Issue(t, testutil.LeafOptions{DNSNames: []string{"*.shared.com"}})
+		if err := k8sClient.Create(ctx, newTLSSecret(t, namespace, "shared-tls", leaf)); err != nil {
+			t.Fatalf("creating secret: %v", err)
+		}
+		sync := &v1alpha1.KeyVaultCertificateSync{
+			ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: namespace},
+			Spec: v1alpha1.KeyVaultCertificateSyncSpec{
+				Source:   v1alpha1.CertificateSourceSpec{SecretRef: v1alpha1.LocalSecretReference{Name: "shared-tls"}},
+				KeyVault: v1alpha1.KeyVaultSpec{Name: "my-vault", CertificateName: certName},
+			},
+		}
+		if err := k8sClient.Create(ctx, sync); err != nil {
+			t.Fatalf("creating sync: %v", err)
+		}
+		return sync
+	}
+
+	owner := create("ownership-owner")
+	eventually(t, 30*time.Second, func() error {
+		var got v1alpha1.KeyVaultCertificateSync
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(owner), &got); err != nil {
+			return err
+		}
+		if !meta.IsStatusConditionTrue(got.Status.Conditions, v1alpha1.ConditionReady) {
+			return fmt.Errorf("owner not ready yet: %+v", got.Status.Conditions)
+		}
+		return nil
+	})
+
+	intruder := create("ownership-intruder")
+	eventually(t, 30*time.Second, func() error {
+		var got v1alpha1.KeyVaultCertificateSync
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(intruder), &got); err != nil {
+			return err
+		}
+		condition := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+		if condition == nil || condition.Reason != "VaultCertificateNotOwned" {
+			return fmt.Errorf("Ready condition = %+v, want reason VaultCertificateNotOwned", condition)
+		}
+		return nil
+	})
+
+	if count := testVault.importCount(certName); count != 1 {
+		t.Errorf("imports = %d, want 1 -- the second sync must not have written", count)
+	}
+}

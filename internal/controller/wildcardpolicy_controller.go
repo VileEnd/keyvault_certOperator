@@ -119,7 +119,12 @@ func (r *WildcardCertificatePolicyReconciler) Reconcile(ctx context.Context, req
 		return ctrl.Result{}, err
 	}
 
-	state, err := r.plan(ctx, &policy, existing)
+	existingDNSNames, err := r.generatedDNSNames(ctx, &policy)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	state, err := r.plan(ctx, &policy, existing, existingDNSNames)
 	if err != nil {
 		reason, retryable := classify(err)
 		log.Error(err, "discovery failed", "reason", reason)
@@ -230,8 +235,32 @@ func (r *WildcardCertificatePolicyReconciler) generatedCertificateNames(
 	return names, nil
 }
 
+// generatedDNSNames lists the names already on the certificates this policy
+// generated, so the per-certificate name cap never drops one that is issued.
+// Without cert-manager there are no certificates to read, and nothing to keep.
+func (r *WildcardCertificatePolicyReconciler) generatedDNSNames(
+	ctx context.Context, policy *v1alpha1.WildcardCertificatePolicy,
+) ([]string, error) {
+	available, err := r.Certificates.Available(ctx)
+	if err != nil || !available {
+		return nil, err
+	}
+	var certs cmapi.CertificateList
+	if err := r.List(ctx, &certs,
+		client.InNamespace(policy.Spec.CertificateNamespace),
+		client.MatchingLabels{v1alpha1.LabelPolicy: policy.Name},
+	); err != nil {
+		return nil, fmt.Errorf("listing generated certificates: %w", err)
+	}
+	var names []string
+	for i := range certs.Items {
+		names = append(names, certs.Items[i].Spec.DNSNames...)
+	}
+	return names, nil
+}
+
 func (r *WildcardCertificatePolicyReconciler) plan(
-	ctx context.Context, policy *v1alpha1.WildcardCertificatePolicy, existing []string,
+	ctx context.Context, policy *v1alpha1.WildcardCertificatePolicy, existing, existingDNSNames []string,
 ) (app.DesiredState, error) {
 	vaultURL, err := azure.VaultURL(vaultTarget(policy.Spec.KeyVault), vaultCloud(policy.Spec.KeyVault, r.Cloud))
 	if err != nil {
@@ -263,6 +292,7 @@ func (r *WildcardCertificatePolicyReconciler) plan(
 		Zones:              policy.Spec.Zones,
 		MaxCertificates:    int(policy.Spec.MaxCertificates),
 		Existing:           existing,
+		ExistingDNSNames:   existingDNSNames,
 		Grouping:           domain.Grouping(policy.Spec.Grouping),
 		IssueZoneWildcards: policy.Spec.IssueZoneWildcards,
 		VaultURL:           vaultURL,

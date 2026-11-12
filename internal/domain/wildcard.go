@@ -21,6 +21,14 @@ const (
 	GroupingPerWildcard Grouping = "PerWildcard"
 )
 
+// MaxDNSNamesPerCertificate is the most subject alternative names one
+// certificate may carry. It is Let's Encrypt's limit, and a request above it is
+// refused outright -- which, for a per-zone certificate, means the whole zone
+// stops renewing. Every new subdomain level under a zone adds a name, and a
+// hostname comes from whoever can create an Ingress, so without a cap one
+// namespace can break the certificate every other one depends on.
+const MaxDNSNamesPerCertificate = 100
+
 // MaxListenerHostnames is Application Gateway's hard cap on host names per
 // multi-site HTTPS listener. A certificate may carry more SANs than this; the
 // names simply have to be spread across several listeners.
@@ -49,6 +57,7 @@ const (
 	ReasonOutsideAllowlist = "hostname is not inside any configured zone"
 	ReasonMalformed        = "hostname is malformed or not a usable wildcard"
 	ReasonMaxCertificates  = "maxCertificates reached; certificate not planned"
+	ReasonMaxDNSNames      = "the zone's certificate already carries the maximum of 100 names; hostname not covered"
 )
 
 // PlanInput is the whole input to BuildPlan.
@@ -67,6 +76,12 @@ type PlanInput struct {
 	// early would push an unrelated certificate out of the plan -- and under
 	// orphanPolicy: Prune, out of the plan means deleted.
 	Existing []string
+	// ExistingDNSNames are the names already on issued certificates. Like
+	// Existing, it matters only at a limit: when a zone's certificate reaches
+	// MaxDNSNamesPerCertificate, a name it already carries keeps its place and
+	// the new one is reported instead. Otherwise a hostname that merely sorts
+	// early would push a served one off the certificate.
+	ExistingDNSNames []string
 	// Grouping selects the packing strategy; empty means GroupingPerZone.
 	Grouping Grouping
 	// IssueZoneWildcards plans "*.zone" for every configured zone, whether or
@@ -93,7 +108,7 @@ type Plan struct {
 //
 // Discovery-driven issuance is the most dangerous part of this operator: anyone
 // who can create an Ingress could otherwise trigger ACME issuance and burn the
-// Let's Encrypt rate limits for a registered domain. Three guards apply, and
+// Let's Encrypt rate limits for a registered domain. Four guards apply, and
 // none of them are optional:
 //
 //  1. Zones is a required allowlist. A hostname outside every configured zone is
@@ -101,6 +116,7 @@ type Plan struct {
 //  2. Every zone is checked against the Public Suffix List, so "com" or "co.uk"
 //     can never become "*.com" or "*.co.uk".
 //  3. MaxCertificates caps the plan; the overflow is reported, not issued.
+//  4. MaxDNSNamesPerCertificate caps the names under one zone, likewise.
 //
 // Wildcards match exactly one label, so "*.x.com" covers "a.x.com" but neither
 // "x.com" nor "a.b.x.com". The apex is therefore added as its own SAN, and a
@@ -155,6 +171,14 @@ func BuildPlan(in PlanInput) (Plan, error) {
 	if grouping == "" {
 		grouping = GroupingPerZone
 	}
+	for zone, names := range required {
+		kept, dropped := capDNSNames(zone, names, in.ExistingDNSNames)
+		required[zone] = kept
+		for _, name := range dropped {
+			plan.Skipped = append(plan.Skipped, SkippedHost{Host: name, Reason: ReasonMaxDNSNames})
+		}
+	}
+
 	certs, err := group(required, grouping)
 	if err != nil {
 		return Plan{}, err
@@ -170,6 +194,40 @@ func BuildPlan(in PlanInput) (Plan, error) {
 	plan.Certificates = certs
 	sortSkipped(plan.Skipped)
 	return plan, nil
+}
+
+// capDNSNames bounds one zone's names to MaxDNSNamesPerCertificate.
+//
+// The zone's own wildcard and apex come first, then names an issued
+// certificate already carries, then the rest in sort order. The cap applies to
+// the zone as a whole under either grouping: it is what bounds how much
+// issuance one zone can be made to ask for.
+func capDNSNames(zone string, names map[string]struct{}, existing []string) (kept map[string]struct{}, dropped []string) {
+	if len(names) <= MaxDNSNamesPerCertificate {
+		return names, nil
+	}
+	issued := make(map[string]struct{}, len(existing))
+	for _, name := range existing {
+		issued[NormalizeHost(name)] = struct{}{}
+	}
+
+	sorted := sortedKeys(names)
+	rank := func(name string) int {
+		if name == "*."+zone || name == zone {
+			return 0
+		}
+		if _, ok := issued[name]; ok {
+			return 1
+		}
+		return 2
+	}
+	sort.SliceStable(sorted, func(i, j int) bool { return rank(sorted[i]) < rank(sorted[j]) })
+
+	kept = make(map[string]struct{}, MaxDNSNamesPerCertificate)
+	for _, name := range sorted[:MaxDNSNamesPerCertificate] {
+		kept[name] = struct{}{}
+	}
+	return kept, sorted[MaxDNSNamesPerCertificate:]
 }
 
 // requiredName maps one discovered hostname to the SAN that must cover it.

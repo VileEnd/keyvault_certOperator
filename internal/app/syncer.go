@@ -50,6 +50,9 @@ type Syncer struct {
 	Vault  VaultRepository
 	Encode Encoder
 	Clock  Clock
+	// Ownership decides which existing certificates may be imported over. The
+	// zero value is the default, domain.OwnershipAdoptUntagged.
+	Ownership domain.OwnershipMode
 }
 
 // NewSyncer wires a Syncer, defaulting the clock.
@@ -111,6 +114,13 @@ func (s *Syncer) Sync(ctx context.Context, req SyncRequest) (SyncOutcome, error)
 
 	if decision.Action == domain.ActionNone {
 		return outcome, nil
+	}
+
+	// Checked only now that an import is certain. The name is chosen by whoever
+	// wrote the resource, so this is what stops one sync replacing a
+	// certificate another one -- or an Application Gateway listener -- relies on.
+	if err := domain.CheckOwnership(snapshot, req.Source.String(), s.Ownership); err != nil {
+		return SyncOutcome{}, fmt.Errorf("refusing to import over %s: %w", req.Vault.CertificateName, err)
 	}
 
 	blob, password, err := s.Encode.Encode(bundle)

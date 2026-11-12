@@ -70,6 +70,9 @@ func (v *recordingVault) Import(_ context.Context, ref app.VaultRef, req app.Imp
 		Enabled:     true,
 		Thumbprint:  []byte(req.Tags["test-thumbprint"]),
 		ChainDigest: req.Tags[app.TagChainDigest],
+		ManagedSource: app.SecretRef{
+			Namespace: req.Tags[app.TagSourceNamespace], Name: req.Tags[app.TagSourceSecret],
+		}.String(),
 	}
 	return app.ImportResult{Version: version}, nil
 }

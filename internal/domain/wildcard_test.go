@@ -2,6 +2,7 @@ package domain_test
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"testing"
@@ -430,4 +431,49 @@ func requestNames(certs []domain.CertificateRequest) []string {
 		out = append(out, cert.Name)
 	}
 	return out
+}
+
+// Every new subdomain level adds a name to the zone's certificate, and a
+// hostname comes from whoever can create an Ingress. Past Let's Encrypt's 100
+// names the request is refused and the whole zone stops renewing.
+func TestBuildPlanCapsTheNamesOnOneCertificate(t *testing.T) {
+	t.Parallel()
+	served := []string{"*.shop.x.com", "*.zz-last.x.com"}
+	hosts := []string{"a.shop.x.com", "a.zz-last.x.com", "x.com", "a.x.com"}
+	for i := range 150 {
+		hosts = append(hosts, fmt.Sprintf("a.flood-%03d.x.com", i))
+	}
+
+	plan, err := domain.BuildPlan(domain.PlanInput{
+		Hosts: hosts, Zones: []string{"x.com"}, MaxCertificates: 10, ExistingDNSNames: served,
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if len(plan.Certificates) != 1 {
+		t.Fatalf("certificates = %d, want 1", len(plan.Certificates))
+	}
+	names := plan.Certificates[0].DNSNames
+	if len(names) != domain.MaxDNSNamesPerCertificate {
+		t.Fatalf("names = %d, want %d", len(names), domain.MaxDNSNamesPerCertificate)
+	}
+
+	// What is already served keeps its place. "*.zz-last.x.com" sorts after
+	// every flood name, so a cap that simply truncated would have dropped it.
+	for _, want := range append([]string{"*.x.com", "x.com"}, served...) {
+		if !slices.Contains(names, want) {
+			t.Errorf("%q was dropped from the certificate", want)
+		}
+	}
+
+	// And the overflow is reported, not silently lost.
+	dropped := 0
+	for _, skipped := range plan.Skipped {
+		if skipped.Reason == domain.ReasonMaxDNSNames {
+			dropped++
+		}
+	}
+	if want := 154 - domain.MaxDNSNamesPerCertificate; dropped != want {
+		t.Errorf("reported %d names over the cap, want %d", dropped, want)
+	}
 }
