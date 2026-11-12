@@ -1,0 +1,31 @@
+name: Dependabot auto-merge
+
+# Dependency updates sat open for two months because merging each one was a
+# manual step. This asks GitHub to merge a patch or minor update by itself once
+# the required checks pass. A major bump is a decision, so it still waits for a
+# person.
+#
+# It depends entirely on main requiring status checks. "--auto" means "when the
+# requirements are met", and with none configured that is immediately: the
+# first version of this workflow merged three pull requests the moment they
+# opened, one of which broke the build. If branch protection is ever removed,
+# remove this with it.
+on: pull_request
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    name: Enable auto-merge
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    steps:
+      - id: metadata
+        uses: dependabot/fetch-metadata@v2
+      - if: steps.metadata.outputs.update-type != 'version-update:semver-major'
+        run: gh pr merge --auto --merge "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
