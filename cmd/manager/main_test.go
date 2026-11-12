@@ -2,6 +2,10 @@ package main
 
 import (
 	"testing"
+	"time"
+
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/VileEnd/keyvault_certOperator/internal/infra/azure"
 )
@@ -58,5 +62,37 @@ func TestParseAllowedVaultsEmptyMeansUnrestricted(t *testing.T) {
 	}
 	if allowed.Enforced() {
 		t.Errorf("allowlist %s is enforced; blank entries must not bound anything", allowed)
+	}
+}
+
+func TestCRDWatcherRestartsOnceTheKindIsServed(t *testing.T) {
+	t.Parallel()
+	// Gateway API installed after the operator started is otherwise invisible
+	// until someone restarts the pod by hand.
+	gvk := schema.GroupVersionKind{Group: "gateway.networking.k8s.io", Version: "v1", Kind: "Gateway"}
+	mapper := meta.NewDefaultRESTMapper(nil)
+	restarted := make(chan struct{})
+
+	watcher := &crdWatcher{
+		mapper:   mapper,
+		kinds:    []schema.GroupKind{gvk.GroupKind()},
+		version:  gvk.Version,
+		interval: 10 * time.Millisecond,
+		restart:  func() { close(restarted) },
+	}
+	go func() { _ = watcher.Start(t.Context()) }()
+
+	select {
+	case <-restarted:
+		t.Fatal("restarted while the kind was still absent")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	mapper.Add(gvk, meta.RESTScopeNamespace)
+
+	select {
+	case <-restarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("did not restart after the kind appeared")
 	}
 }

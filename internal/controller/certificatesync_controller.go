@@ -14,7 +14,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -36,6 +38,16 @@ const SecretRefIndexKey = ".spec.source.secretRef.name"
 // Vault out of band, while ordinary renewals arrive as Secret watch events
 // within seconds.
 const DefaultResyncInterval = time.Hour
+
+// SyncConcurrency is how many certificates are synced at once. With a single
+// worker, one certificate backing off against a slow or throttled vault holds
+// up every other one behind it.
+const SyncConcurrency = 4
+
+// ReconcileTimeout bounds one reconcile. The Azure SDK sets no overall deadline
+// of its own, so without this a connection that hangs after the handshake would
+// hold its worker indefinitely.
+const ReconcileTimeout = 2 * time.Minute
 
 // KeyVaultCertificateSyncReconciler keeps one TLS Secret mirrored into one Key
 // Vault certificate.
@@ -260,8 +272,12 @@ func (r *KeyVaultCertificateSyncReconciler) SetupWithManager(mgr ctrl.Manager) e
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.KeyVaultCertificateSync{}).
+		For(&v1alpha1.KeyVaultCertificateSync{}, builder.WithPredicates(specOrDeletionChanged())).
 		Named("keyvaultcertificatesync").
+		WithOptions(controller.Options{
+			MaxConcurrentReconciles: SyncConcurrency,
+			ReconciliationTimeout:   ReconcileTimeout,
+		}).
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.syncsForSecret),
@@ -271,6 +287,27 @@ func (r *KeyVaultCertificateSyncReconciler) SetupWithManager(mgr ctrl.Manager) e
 			builder.WithPredicates(predicate.And(managed, predicate.ResourceVersionChangedPredicate{})),
 		).
 		Complete(r)
+}
+
+// specOrDeletionChanged lets through only the updates a reconcile can act on: a
+// spec change, or the start of a deletion.
+//
+// Without it the controllers wake themselves. Every successful pass stamps a
+// fresh timestamp into status, that write arrives back as an update event, and
+// the pass it triggers reads Key Vault again and stamps another. It stops only
+// when two passes land inside the same second, so a vault slow enough to take
+// longer than that turns it into a loop. Periodic drift detection is unaffected:
+// that is RequeueAfter, not an event.
+func specOrDeletionChanged() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			if e.ObjectOld == nil || e.ObjectNew == nil {
+				return false
+			}
+			return e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() ||
+				e.ObjectOld.GetDeletionTimestamp().IsZero() != e.ObjectNew.GetDeletionTimestamp().IsZero()
+		},
+	}
 }
 
 // syncsForSecret maps a Secret event to the resources referencing it, so a

@@ -115,6 +115,11 @@ func (r *Repository) Import(ctx context.Context, ref app.VaultRef, req app.Impor
 
 	resp, err := client.ImportCertificate(ctx, ref.CertificateName, params, nil)
 	if err != nil {
+		if isConflict(err) {
+			return app.ImportResult{}, fmt.Errorf("%w: %q is most likely soft-deleted in %s; "+
+				"recover it (az keyvault certificate recover) or purge it, and the next resync imports: %w",
+				domain.ErrVaultConflict, ref.CertificateName, ref.VaultURL, err)
+		}
 		return app.ImportResult{}, fmt.Errorf("importing certificate %q: %w", ref.CertificateName, err)
 	}
 
@@ -145,6 +150,13 @@ func (r *Repository) clientFor(vaultURL string) (*azcertificates.Client, error) 
 func isNotFound(err error) bool {
 	var respErr *azcore.ResponseError
 	return errors.As(err, &respErr) && respErr.StatusCode == http.StatusNotFound
+}
+
+// isConflict picks out the 409 Key Vault returns when the name cannot be written
+// to, which a retry never resolves.
+func isConflict(err error) bool {
+	var respErr *azcore.ResponseError
+	return errors.As(err, &respErr) && respErr.StatusCode == http.StatusConflict
 }
 
 func toAzureTags(tags map[string]string) map[string]*string {

@@ -2,6 +2,7 @@ package azure_test
 
 import (
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -145,6 +146,26 @@ func TestImportSendsBase64PayloadContentTypeAndTags(t *testing.T) {
 	}
 	if got.Tags[app.TagChainDigest] == nil || *got.Tags[app.TagChainDigest] != "digest" {
 		t.Error("chain digest tag was not sent")
+	}
+}
+
+func TestImportReportsAConflictAsItsOwnError(t *testing.T) {
+	t.Parallel()
+	// A soft-deleted certificate reads as absent and then refuses the import
+	// with 409. Left as a generic failure it is retried forever with nothing to
+	// say what to do about it.
+	server := &fake.Server{
+		ImportCertificate: func(_ testContext, _ string, _ azcertificates.ImportCertificateParameters,
+			_ *azcertificates.ImportCertificateOptions) (
+			resp azfake.Responder[azcertificates.ImportCertificateResponse], errResp azfake.ErrorResponder) {
+			errResp.SetResponseError(http.StatusConflict, "Conflict")
+			return
+		},
+	}
+
+	_, err := newRepository(t, server).Import(t.Context(), testRef(), app.ImportRequest{Blob: []byte("pretend-pfx")})
+	if !errors.Is(err, domain.ErrVaultConflict) {
+		t.Fatalf("Import error = %v, want ErrVaultConflict", err)
 	}
 }
 

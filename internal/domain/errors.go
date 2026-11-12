@@ -36,4 +36,8 @@ var (
 	// ErrVaultNotAllowed means the resource named a vault outside the operator's
 	// allowlist. It is terminal: no amount of retrying makes a vault permitted.
 	ErrVaultNotAllowed = errors.New("key vault is not in the operator's allowlist")
+	// ErrVaultConflict means Key Vault answered an import with 409 Conflict. The
+	// usual cause is a soft-deleted certificate holding the name: a read reports
+	// it as absent, so the import is attempted, and refused, on every pass.
+	ErrVaultConflict = errors.New("key vault refused the import because the certificate name is in conflict")
 )

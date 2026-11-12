@@ -98,6 +98,13 @@ func TestSyncControllerImportsOnceAndThenLeavesKeyVaultAlone(t *testing.T) {
 		if count := testVault.importCount(certName); count != 1 {
 			return fmt.Errorf("imports = %d, want it to stay at 1", count)
 		}
+		// One read, for the one pass the create asked for. The controller's own
+		// finalizer and status writes come back as update events, and acting on
+		// them means a Key Vault read per write -- each of which stamps a new
+		// timestamp and so triggers the next.
+		if count := testVault.readCount(certName); count != 1 {
+			return fmt.Errorf("Key Vault reads = %d, want 1: the controller is waking itself", count)
+		}
 		return nil
 	})
 }
