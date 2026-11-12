@@ -76,7 +76,7 @@ lint-fix: golangci-lint ## Run golangci-lint with --fix.
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run all tests, including envtest.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
-		go test $$(go list ./... | grep -v /test/e2e) -coverprofile cover.out
+		go test -race $$(go list ./... | grep -v /test/e2e) -coverprofile cover.out
 
 .PHONY: test-unit
 test-unit: ## Run only the tests that need neither a cluster nor Azure.

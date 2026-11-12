@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -65,18 +66,33 @@ func TestParseAllowedVaultsEmptyMeansUnrestricted(t *testing.T) {
 	}
 }
 
+// switchableMapper serves no kind until it is told to, the way the API server
+// does before and after a CRD is installed. The stock mapper is not safe to
+// change while it is being read, which the race detector rightly objects to.
+type switchableMapper struct {
+	meta.RESTMapper
+	served atomic.Bool
+}
+
+func (m *switchableMapper) RESTMapping(gk schema.GroupKind, _ ...string) (*meta.RESTMapping, error) {
+	if !m.served.Load() {
+		return nil, &meta.NoKindMatchError{GroupKind: gk}
+	}
+	return &meta.RESTMapping{}, nil
+}
+
 func TestCRDWatcherRestartsOnceTheKindIsServed(t *testing.T) {
 	t.Parallel()
 	// Gateway API installed after the operator started is otherwise invisible
 	// until someone restarts the pod by hand.
-	gvk := schema.GroupVersionKind{Group: "gateway.networking.k8s.io", Version: "v1", Kind: "Gateway"}
-	mapper := meta.NewDefaultRESTMapper(nil)
+	gk := schema.GroupKind{Group: "gateway.networking.k8s.io", Kind: "Gateway"}
+	mapper := &switchableMapper{}
 	restarted := make(chan struct{})
 
 	watcher := &crdWatcher{
 		mapper:   mapper,
-		kinds:    []schema.GroupKind{gvk.GroupKind()},
-		version:  gvk.Version,
+		kinds:    []schema.GroupKind{gk},
+		version:  "v1",
 		interval: 10 * time.Millisecond,
 		restart:  func() { close(restarted) },
 	}
@@ -88,7 +104,7 @@ func TestCRDWatcherRestartsOnceTheKindIsServed(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	mapper.Add(gvk, meta.RESTScopeNamespace)
+	mapper.served.Store(true)
 
 	select {
 	case <-restarted:
