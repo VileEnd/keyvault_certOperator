@@ -189,10 +189,10 @@ jobs:
       - name: Render the single-file installer
         run: make build-installer IMG="${{ steps.registry.outputs.image }}:${{ steps.version.outputs.tag }}"
 
-      # Pre-release on purpose. The operator has never run against a real Key
-      # Vault -- the end-to-end suite proves the wire protocol against a
-      # faithful fake, not Azure's acceptance of the PKCS#12 archive. The tag
-      # promises a reproducible artifact, not a validated one.
+      # Pre-release on purpose. The operator runs against a real Key Vault in
+      # one cluster, but the end-to-end suite proves only the wire protocol
+      # against a faithful fake, not Azure's acceptance of the PKCS#12 archive.
+      # The tag promises a reproducible artifact, not a validated one.
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -217,9 +217,9 @@ jobs:
           pinned to it, and a Terraform module you can reference by ref.
 
           It does **not** promise a stable API, and it does not promise that the
-          Azure path works. The API is `v1alpha1`. The operator has never talked
-          to a real Key Vault -- the end-to-end suite proves the wire protocol
-          against a faithful fake, and the Terraform module is schema-validated
+          Azure path works. The API is `v1alpha1`. The operator runs against a
+          real Key Vault in one cluster, but the end-to-end suite proves only the
+          wire protocol against a faithful fake, and the Terraform module is schema-validated
           but has never been applied. That is why this is marked a pre-release.
           NOTES
           gh release create "${{ steps.version.outputs.tag }}" \
