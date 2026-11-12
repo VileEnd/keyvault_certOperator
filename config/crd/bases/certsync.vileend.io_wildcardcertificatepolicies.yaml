@@ -103,7 +103,8 @@ spec:
                       HTTPRoutes enables discovery from Gateway API HTTPRoute resources.
 
                       The watch can only be established if the Gateway API CRDs are present when
-                      the operator starts, so installing Gateway API later requires a restart.
+                      the operator starts; if Gateway API is installed later, the operator
+                      restarts itself to pick it up.
 
                       Unset means "use it when available". Setting it explicitly to true states
                       a requirement: pruning is then withheld if the CRDs were absent at

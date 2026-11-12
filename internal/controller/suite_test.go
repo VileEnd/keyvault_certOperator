@@ -42,15 +42,17 @@ type recordingVault struct {
 	mu      sync.Mutex
 	stored  map[string]domain.VaultSnapshot
 	imports map[string]int
+	reads   map[string]int
 }
 
 func newRecordingVault() *recordingVault {
-	return &recordingVault{stored: map[string]domain.VaultSnapshot{}, imports: map[string]int{}}
+	return &recordingVault{stored: map[string]domain.VaultSnapshot{}, imports: map[string]int{}, reads: map[string]int{}}
 }
 
 func (v *recordingVault) Snapshot(_ context.Context, ref app.VaultRef) (domain.VaultSnapshot, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	v.reads[ref.CertificateName]++
 	snapshot, ok := v.stored[ref.CertificateName]
 	if !ok {
 		return domain.VaultSnapshot{Exists: false}, nil
@@ -84,6 +86,12 @@ func (v *recordingVault) exists(name string) bool {
 	defer v.mu.Unlock()
 	_, ok := v.stored[name]
 	return ok
+}
+
+func (v *recordingVault) readCount(name string) int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.reads[name]
 }
 
 func (v *recordingVault) importCount(name string) int {

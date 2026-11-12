@@ -6,11 +6,13 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -24,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -100,7 +103,8 @@ func run() error {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
-	ctx := ctrl.SetupSignalHandler()
+	ctx, stop := context.WithCancel(ctrl.SetupSignalHandler())
+	defer stop()
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), managerOptions(opts))
 	if err != nil {
@@ -146,7 +150,8 @@ func run() error {
 	// The HTTPRoute watch has to be decided here, before the manager starts:
 	// controller-runtime cannot open an informer for a type the API server does
 	// not serve. Installing Gateway API later therefore needs a restart, which
-	// is documented. cert-manager, by contrast, is probed on every reconcile.
+	// the watcher below performs. cert-manager, by contrast, is probed on every
+	// reconcile.
 	watches := []client.Object{&networkingv1.Ingress{}}
 	httpRoutes := crdInstalled(mgr.GetRESTMapper(),
 		schema.GroupKind{Group: gatewayv1.GroupName, Kind: "HTTPRoute"}, gatewayv1.GroupVersion.Version)
@@ -171,7 +176,30 @@ func run() error {
 			"httpRoutes", httpRoutes, "gateways", gateways)
 	default:
 		setup.Info("Gateway API not detected; discovering hostnames from Ingress only. " +
-			"Restart the operator after installing Gateway API to pick up Gateways and HTTPRoutes.")
+			"The operator restarts itself once Gateway API is installed.")
+	}
+
+	// A watch can only be opened at startup, so a kind that was missing then
+	// stays unwatched for the life of the process. Rather than leave that to
+	// someone remembering to restart the pod, the operator notices the kind
+	// being served and exits; the Deployment brings it back with the watch.
+	var missing []schema.GroupKind
+	if !httpRoutes {
+		missing = append(missing, schema.GroupKind{Group: gatewayv1.GroupName, Kind: "HTTPRoute"})
+	}
+	if !gateways {
+		missing = append(missing, schema.GroupKind{Group: gatewayv1.GroupName, Kind: "Gateway"})
+	}
+	if len(missing) > 0 {
+		if err := mgr.Add(&crdWatcher{
+			mapper:   mgr.GetRESTMapper(),
+			kinds:    missing,
+			version:  gatewayv1.GroupVersion.Version,
+			interval: crdPollInterval,
+			restart:  stop,
+		}); err != nil {
+			return fmt.Errorf("adding the Gateway API watcher: %w", err)
+		}
 	}
 
 	if err := (&controller.WildcardCertificatePolicyReconciler{
@@ -287,6 +315,50 @@ func parseAllowedVaults(value string, cloud azure.Cloud) (domain.VaultAllowlist,
 func crdInstalled(mapper meta.RESTMapper, gk schema.GroupKind, version string) bool {
 	_, err := mapper.RESTMapping(gk, version)
 	return err == nil
+}
+
+// crdPollInterval is how often the operator looks for kinds that were not
+// served when it started.
+const crdPollInterval = time.Minute
+
+// crdWatcher restarts the operator when a kind it could not watch at startup
+// starts being served.
+type crdWatcher struct {
+	mapper   meta.RESTMapper
+	kinds    []schema.GroupKind
+	version  string
+	interval time.Duration
+	restart  func()
+}
+
+var (
+	_ manager.Runnable               = (*crdWatcher)(nil)
+	_ manager.LeaderElectionRunnable = (*crdWatcher)(nil)
+)
+
+// NeedLeaderElection is false so that standby replicas restart too. Otherwise
+// one of them would later take over the lease still lacking the watch.
+func (w *crdWatcher) NeedLeaderElection() bool { return false }
+
+// Start polls until one of the kinds appears, then asks for a restart.
+func (w *crdWatcher) Start(ctx context.Context) error {
+	ticker := time.NewTicker(w.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			for _, kind := range w.kinds {
+				if crdInstalled(w.mapper, kind, w.version) {
+					setup.Info("a kind that was absent at startup is now served; restarting to watch it",
+						"kind", kind.String())
+					w.restart()
+					return nil
+				}
+			}
+		}
+	}
 }
 
 func splitNamespaces(value string) []string {

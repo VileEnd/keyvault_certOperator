@@ -12,7 +12,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -57,7 +59,8 @@ type WildcardCertificatePolicyReconciler struct {
 
 	// HTTPRoutesAvailable records whether the Gateway API CRDs were present at
 	// startup. The watch cannot be established for an unknown type, so enabling
-	// Gateway API afterwards needs an operator restart.
+	// Gateway API afterwards needs an operator restart, which the manager does
+	// for itself once it sees the kinds being served.
 	HTTPRoutesAvailable bool
 	// GatewaysAvailable records the same for the Gateway kind.
 	GatewaysAvailable bool
@@ -496,9 +499,13 @@ func (r *WildcardCertificatePolicyReconciler) event(obj *v1alpha1.WildcardCertif
 // SetupWithManager registers the controller and its discovery watches.
 func (r *WildcardCertificatePolicyReconciler) SetupWithManager(mgr ctrl.Manager, watches []client.Object) error {
 	b := ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.WildcardCertificatePolicy{}).
+		For(&v1alpha1.WildcardCertificatePolicy{}, builder.WithPredicates(specOrDeletionChanged())).
 		Named("wildcardcertificatepolicy").
-		Owns(&v1alpha1.KeyVaultCertificateSync{})
+		WithOptions(controller.Options{ReconciliationTimeout: ReconcileTimeout}).
+		// A generated sync resource matters to the policy when it is edited or
+		// deleted, not each time its own controller writes status -- which is
+		// once per certificate per resync.
+		Owns(&v1alpha1.KeyVaultCertificateSync{}, builder.WithPredicates(specOrDeletionChanged()))
 
 	for _, obj := range watches {
 		b = b.Watches(obj, r.enqueueAllPolicies())

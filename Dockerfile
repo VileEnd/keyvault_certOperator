@@ -21,7 +21,9 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
 
 # distroless/static:nonroot has no shell and no package manager, which keeps the
 # attack surface of a process that handles TLS private keys as small as possible.
-FROM gcr.io/distroless/static:nonroot
+# Pinned by digest so a rebuild of the same commit yields the same image;
+# Dependabot moves the digest.
+FROM gcr.io/distroless/static:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329
 WORKDIR /
 COPY --from=builder /workspace/manager .
 USER 65532:65532

@@ -1,0 +1,56 @@
+{{- if and .Values.metrics.enabled .Values.metrics.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "keyvault-certoperator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "keyvault-certoperator.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+  - name: keyvault-certoperator
+    rules:
+    - alert: CertSyncCertificateExpiringSoon
+      expr: certsync_certificate_not_after_timestamp_seconds - time() < {{ mul (int .Values.metrics.prometheusRule.expiryWarningDays) 86400 }}
+      for: 1h
+      labels:
+        severity: warning
+      annotations:
+        summary: {{ `Certificate {{ $labels.certificate }} expires in {{ $value | humanizeDuration }}` | quote }}
+        description: {{ `The certificate synced by {{ $labels.namespace }}/{{ $labels.name }} has not been renewed. Check the cert-manager Certificate and the sync resource's conditions.` | quote }}
+    - alert: CertSyncCertificateExpiryImminent
+      expr: certsync_certificate_not_after_timestamp_seconds - time() < {{ mul (int .Values.metrics.prometheusRule.expiryCriticalDays) 86400 }}
+      for: 15m
+      labels:
+        severity: critical
+      annotations:
+        summary: {{ `Certificate {{ $labels.certificate }} expires in {{ $value | humanizeDuration }}` | quote }}
+        description: {{ `Application Gateway will serve an expired certificate for {{ $labels.namespace }}/{{ $labels.name }} unless it is renewed and synced.` | quote }}
+    - alert: CertSyncStale
+      expr: time() - certsync_last_success_timestamp_seconds > {{ int .Values.metrics.prometheusRule.staleAfterSeconds }}
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        summary: {{ `{{ $labels.namespace }}/{{ $labels.name }} has not synced for {{ $value | humanizeDuration }}` | quote }}
+        description: "The last successful sync is older than expected. Check the resource's Synced condition and the operator logs."
+    - alert: CertSyncFailing
+      expr: increase(certsync_sync_total{result="error"}[30m]) > 0
+      for: 30m
+      labels:
+        severity: warning
+      annotations:
+        summary: {{ `Syncs of {{ $labels.namespace }}/{{ $labels.name }} keep failing` | quote }}
+        description: "The sync has been returning errors for at least an hour. The resource's Synced condition carries the reason."
+    - alert: CertSyncOperatorDown
+      expr: absent(up{job="{{ include "keyvault-certoperator.fullname" . }}-metrics"} == 1)
+      for: 15m
+      labels:
+        severity: critical
+      annotations:
+        summary: "keyvault-certoperator is not being scraped"
+        description: "No running operator has been scraped for 15 minutes, so renewals are not reaching Key Vault and the other alerts cannot fire."
+{{- end }}

@@ -23,6 +23,9 @@ const (
 	ReasonCertificateExpired = "CertificateExpired"
 	ReasonConfigInvalid      = "ConfigInvalid"
 	ReasonVaultError         = "VaultError"
+	// ReasonVaultConflict means Key Vault refused the import because the name
+	// is taken, in practice by a soft-deleted certificate.
+	ReasonVaultConflict      = "VaultConflict"
 	ReasonDiscoveryFailed    = "DiscoveryFailed"
 	ReasonIssuanceFailed     = "IssuanceFailed"
 	ReasonCertManagerMissing = "CertManagerMissing"
@@ -33,20 +36,18 @@ const (
 	ReasonPruneWithheld = "PruneWithheld"
 )
 
-// updateStatus writes a resource's status subresource, tolerating the two
-// failures that mean "this write no longer matters".
+// updateStatus writes a resource's status subresource.
 //
-// A conflict means someone else changed the object, so the next reconcile
-// recomputes status from the current one -- retrying against a stale object
-// would only overwrite fresher data. A NotFound means the resource was deleted
-// while this pass was running.
-//
-// Shared by both controllers on purpose. They previously had one of these each,
-// tolerating a different one of the two errors, so which transient failure
-// turned into a requeue depended on which controller you were in.
+// A NotFound is tolerated: the resource was deleted while this pass was running
+// and there is nothing left to report on. A conflict is returned, so the pass is
+// retried against the current object. It used to be swallowed on the grounds
+// that whatever caused it would wake the controller anyway, but a label or
+// annotation edit conflicts without changing the generation, and the watch
+// predicate rightly ignores those -- the status would then stay stale until the
+// next resync.
 func updateStatus(ctx context.Context, c client.Client, obj client.Object) error {
 	if err := c.Status().Update(ctx, obj); err != nil {
-		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			return nil
 		}
 		return fmt.Errorf("updating status: %w", err)
@@ -108,6 +109,11 @@ func classify(err error) (reason string, retryable bool) {
 		// and the 403 it would otherwise produce looks retryable.
 		errors.Is(err, domain.ErrVaultNotAllowed):
 		return ReasonConfigInvalid, false
+	case errors.Is(err, domain.ErrVaultConflict):
+		// Someone has to recover or purge the certificate in Azure; this
+		// operator holds neither permission. Backing off against it would only
+		// bury the instruction under retries.
+		return ReasonVaultConflict, false
 	default:
 		return ReasonVaultError, true
 	}
