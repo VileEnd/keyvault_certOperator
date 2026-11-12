@@ -6,7 +6,7 @@ vault, never wider.
 
 ```hcl
 module "certoperator_identity" {
-  source = "github.com/VileEnd/keyvault_certOperator//terraform?ref=v0.1.1"
+  source = "github.com/VileEnd/keyvault_certOperator//terraform?ref=v0.1.2"
 
   resource_group_name = azurerm_resource_group.this.name
   location            = azurerm_resource_group.this.location
@@ -25,7 +25,7 @@ resource "helm_release" "certoperator" {
 
   repository = "oci://ghcr.io/vileend/charts"
   chart      = "keyvault-certoperator"
-  version    = "0.1.1"
+  version    = "0.1.2"
 
   dynamic "set" {
     for_each = module.certoperator_identity.helm_values
@@ -46,12 +46,11 @@ A complete example against an existing cluster and vault is in
 
 ## Pinning
 
-The `?ref=v0.1.1` above is load-bearing. Without it the source tracks `main`, so
+The `?ref=v0.1.2` above is load-bearing. Without it the source tracks `main`, so
 a `terraform apply` months from now can pick up whatever merged in between.
 
 What the tag promises is a reproducible artifact, not a stable interface. The
-API is `v1alpha1` and the operator has not yet run against a real Key Vault, so
-variable names may still move. Pin it, and read the release notes before moving.
+API is `v1alpha1`, so variable names may still move. Pin it, and read the release notes before moving.
 
 ## What it deliberately does not do
 
